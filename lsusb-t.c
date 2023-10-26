@@ -66,7 +66,7 @@ struct usbdevice {
 	char product[MY_PARAM_MAX];
 	char serial[MY_PARAM_MAX];
 	char version[MY_PARAM_MAX];
-	char speed[MY_PARAM_MAX];	/* '1.5','12','480','5000' + '\n' */
+	char speed[MY_PARAM_MAX];	/* '1.5','12','480','5000','10000','20000' + '\n' */
 	unsigned int rx_lanes;
 	unsigned int tx_lanes;
 
@@ -85,7 +85,7 @@ struct usbbusnode {
 	unsigned int idProduct;
 	unsigned int idVendor;
 	unsigned int maxchild;
-	char speed[5 + 1];	/* '1.5','12','480','5000' + '\n' */
+	char speed[MY_PARAM_MAX];	/* '1.5','12','480','5000','10000','20000' + '\n' */
 	unsigned int rx_lanes;
 	unsigned int tx_lanes;
 
@@ -160,7 +160,7 @@ static void print_usbbusnode(struct usbbusnode *b)
 
 	lanes_to_str(lanes, b->tx_lanes, b->rx_lanes);
 
-	printf("/:  Bus %02u.Port %u: Dev %u, Class=%s, Driver=%s/%up, %sM%s\n", b->busnum, 1,
+	printf("/:  Bus %03u.Port %03u: Dev %03u, Class=%s, Driver=%s/%up, %sM%s\n", b->busnum, 1,
 	       b->devnum, bDeviceClass_to_str(b->bDeviceClass), b->driver, b->maxchild, b->speed, lanes);
 	if (verblevel >= 1) {
 		get_vendor_string(vendor, sizeof(vendor), b->idVendor);
@@ -179,13 +179,16 @@ static void print_usbdevice(struct usbdevice *d, struct usbinterface *i)
 	char lanes[32];
 
 	lanes_to_str(lanes, d->tx_lanes, d->rx_lanes);
-	get_class_string(subcls, sizeof(subcls), i->bInterfaceClass);
+	if (i)
+		get_class_string(subcls, sizeof(subcls), i->bInterfaceClass);
 
-	if (i->bInterfaceClass == 9)
-		printf("Port %u: Dev %u, If %u, Class=%s, Driver=%s/%up, %sM%s\n", d->portnum, d->devnum, i->ifnum, subcls,
+	if (!i)
+		printf("Port %03u: Dev %03u, %sM%s\n", d->portnum, d->devnum, d->speed, lanes);
+	else if (i->bInterfaceClass == 9)
+		printf("Port %03u: Dev %03u, If %u, Class=%s, Driver=%s/%up, %sM%s\n", d->portnum, d->devnum, i->ifnum, subcls,
 		       i->driver, d->maxchild, d->speed, lanes);
 	else
-		printf("Port %u: Dev %u, If %u, Class=%s, Driver=%s, %sM%s\n", d->portnum, d->devnum, i->ifnum, subcls, i->driver,
+		printf("Port %03u: Dev %03u, If %u, Class=%s, Driver=%s, %sM%s\n", d->portnum, d->devnum, i->ifnum, subcls, i->driver,
 		       d->speed, lanes);
 	if (verblevel >= 1) {
 		printf(" %*s", indent, "    ");
@@ -354,6 +357,8 @@ static void add_usb_interface(const char *d_name)
 			p = strrchr(driver, '/');
 			if (p)
 				snprintf(e->driver, sizeof(e->driver), "%s", p + 1);
+		} else {
+			snprintf(e->driver, sizeof(e->driver), "[none]");
 		}
 	} else
 		printf("Can not read driver link for '%s': %d\n", d_name, l);
@@ -555,7 +560,7 @@ static void assign_interface_to_parent(struct usbdevice *d, struct usbinterface 
 		} else {
 			busnum = strtoul(name, &pn, 10);
 			if (pn && pn != name) {
-				if (p[1] == '0')
+				if (pn[1] == '0')
 					append_businterface(busnum, i);
 			}
 		}
@@ -659,7 +664,7 @@ static void sort_devices(void)
 
 static void sort_busses(void)
 {
-	/* need to reverse sort bus numbers */
+	/* sort in numerical order to match 'lsusb' output */
 	struct usbbusnode *t, *p, **pp;
 	int swapped;
 	do {
@@ -669,7 +674,7 @@ static void sort_busses(void)
 		pp = &usbbuslist;
 		swapped = 0;
 		while (p && p->next) {
-			if (p->busnum < p->next->busnum) {
+			if (p->busnum > p->next->busnum) {
 				t = p->next;
 				p->next = t->next;
 				t->next = p;
@@ -686,11 +691,12 @@ static void sort_busses(void)
 static void print_tree_dev_interface(struct usbdevice *d, struct usbinterface *i)
 {
 	indent += 3;
-	while (i) {
+	do {
 		printf(" %*s", indent, "|__ ");
 		print_usbdevice(d, i);
-		i = i->next;
-	}
+		if (i)
+			i = i->next;
+	} while (i);
 	indent -= 3;
 }
 static void print_tree_dev_children(struct usbdevice *d)
