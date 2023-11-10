@@ -20,11 +20,14 @@
 #include <unistd.h>
 #include <stdio.h>
 #include <ctype.h>
+#include <stdbool.h>
 
+#include <libusb.h>
 #include <libudev.h>
 
 #include "usb-spec.h"
 #include "names.h"
+#include "sysfs.h"
 
 
 #define HASH1  0x10
@@ -192,7 +195,7 @@ int get_vendor_string(char *buf, size_t size, uint16_t vid)
                 return 0;
         *buf = 0;
         if (!(cp = names_vendor(vid)))
-		return snprintf(buf, size, "[unknown]");
+		return 0;
         return snprintf(buf, size, "%s", cp);
 }
 
@@ -204,7 +207,7 @@ int get_product_string(char *buf, size_t size, uint16_t vid, uint16_t pid)
                 return 0;
         *buf = 0;
         if (!(cp = names_product(vid, pid)))
-		return snprintf(buf, size, "[unknown]");
+		return 0;
         return snprintf(buf, size, "%s", cp);
 }
 
@@ -230,6 +233,40 @@ int get_subclass_string(char *buf, size_t size, uint8_t cls, uint8_t subcls)
 	if (!(cp = names_subclass(cls, subcls)))
 		return snprintf(buf, size, "[unknown]");
 	return snprintf(buf, size, "%s", cp);
+}
+
+/*
+ * Attempt to get friendly vendor and product names from the udev hwdb. If
+ * either or both are not present, instead populate those from the device's
+ * own string descriptors.
+ */
+void get_vendor_product_with_fallback(char *vendor, int vendor_len,
+				      char *product, int product_len,
+				      libusb_device *dev)
+{
+	struct libusb_device_descriptor desc;
+	char sysfs_name[PATH_MAX];
+	bool have_vendor, have_product;
+
+	libusb_get_device_descriptor(dev, &desc);
+
+	/* set to "[unknown]" by default unless something below finds a string */
+	strncpy(vendor, "[unknown]", vendor_len);
+	strncpy(product, "[unknown]", product_len);
+
+	have_vendor = !!get_vendor_string(vendor, vendor_len, desc.idVendor);
+	have_product = !!get_product_string(product, product_len,
+			desc.idVendor, desc.idProduct);
+
+	if (have_vendor && have_product)
+		return;
+
+	if (get_sysfs_name(sysfs_name, sizeof(sysfs_name), dev) >= 0) {
+		if (!have_vendor)
+			read_sysfs_prop(vendor, vendor_len, sysfs_name, "manufacturer");
+		if (!have_product)
+			read_sysfs_prop(product, product_len, sysfs_name, "product");
+	}
 }
 
 /* ---------------------------------------------------------------------- */
