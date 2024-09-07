@@ -17,11 +17,6 @@
 #include <stdlib.h>
 #include <stdarg.h>
 #include <stdbool.h>
-
-#ifdef HAVE_BYTESWAP_H
-#include <byteswap.h>
-#endif
-
 #include <libusb.h>
 #include <unistd.h>
 
@@ -115,6 +110,11 @@
 #define WEBUSB_GUID		"{3408b638-09a9-47a0-8bfd-a0768815b665}"
 #define WEBUSB_GET_URL		0x02
 #define USB_DT_WEBUSB_URL	0x03
+
+/* New speeds are only in newer versions of libusb */
+#ifndef LIBUSB_SPEED_SUPER_PLUS_X2
+#define LIBUSB_SPEED_SUPER_PLUS_X2	6
+#endif
 
 unsigned int verblevel = VERBLEVEL_DEFAULT;
 static int do_report_desc = 1;
@@ -273,6 +273,7 @@ static void dump_device(
 	char cls[128], subcls[128], proto[128];
 	char mfg[128] = {0}, prod[128] = {0}, serial[128] = {0};
 	char sysfs_name[PATH_MAX];
+	const char *negotiated_speed;
 
 	get_vendor_product_with_fallback(vendor, sizeof(vendor),
 			product, sizeof(product), dev);
@@ -287,6 +288,32 @@ static void dump_device(
 		read_sysfs_prop(prod, sizeof(prod), sysfs_name, "product");
 		read_sysfs_prop(serial, sizeof(serial), sysfs_name, "serial");
 	}
+
+	switch (libusb_get_device_speed(dev)) {
+		case LIBUSB_SPEED_LOW:
+			negotiated_speed = "Low Speed (1Mbps)";
+			break;
+		case LIBUSB_SPEED_FULL:
+			negotiated_speed = "Full Speed (12Mbps)";
+			break;
+		case LIBUSB_SPEED_HIGH:
+			negotiated_speed = "High Speed (480Mbps)";
+			break;
+		case LIBUSB_SPEED_SUPER:
+			negotiated_speed = "SuperSpeed (5Gbps)";
+			break;
+		case LIBUSB_SPEED_SUPER_PLUS:
+			negotiated_speed = "SuperSpeed+ (10Gbps)";
+			break;
+		case LIBUSB_SPEED_SUPER_PLUS_X2:
+			negotiated_speed = "SuperSpeed++ (20Gbps)";
+			break;
+		case LIBUSB_SPEED_UNKNOWN:
+		default:
+			negotiated_speed = "Unknown";
+			break;
+	}
+	printf("Negotiated speed: %s\n", negotiated_speed);
 
 	printf("Device Descriptor:\n"
 	       "  bLength             %5u\n"
@@ -2130,8 +2157,8 @@ static void dump_ccid_device(const unsigned char *buf)
 	       "        bDescriptorType     %5u\n"
 	       "        bcdCCID             %2x.%02x",
 	       buf[0], buf[1], buf[3], buf[2]);
-	if (buf[3] != 1 || buf[2] != 0)
-		fputs("  (Warning: Only accurate for version 1.0)", stdout);
+	if (buf[3] != 1 || (buf[2] != 0 && buf[2] != 0x10))
+		fputs("  (Warning: Only accurate for version 1.0/1.1)", stdout);
 	putchar('\n');
 
 	printf("        nMaxSlotIndex       %5u\n"
@@ -2200,9 +2227,9 @@ static void dump_ccid_device(const unsigned char *buf)
 		fputs("          Auto clock change\n", stdout);
 	if ((us & 0x0020))
 		fputs("          Auto baud rate change\n", stdout);
-	if ((us & 0x0040))
+	if ((us & (0x0040 | 0x0080)) == 0x0040)
 		fputs("          Auto parameter negotiation made by CCID\n", stdout);
-	else if ((us & 0x0080))
+	else if ((us & (0x0040 | 0x0080)) == 0x0080)
 		fputs("          Auto PPS made by CCID\n", stdout);
 	else if ((us & (0x0040 | 0x0080)))
 		fputs("        WARNING: conflicting negotiation features\n", stdout);
@@ -2210,18 +2237,23 @@ static void dump_ccid_device(const unsigned char *buf)
 	if ((us & 0x0100))
 		fputs("          CCID can set ICC in clock stop mode\n", stdout);
 	if ((us & 0x0200))
-		fputs("          NAD value other than 0x00 accepted\n", stdout);
+		fputs("          NAD value other than 0x00 accepted (T=1)\n", stdout);
 	if ((us & 0x0400))
-		fputs("          Auto IFSD exchange\n", stdout);
+		fputs("          Auto IFSD exchange (T=1)\n", stdout);
 
-	if ((us & 0x00010000))
+	if ((us & 0x00070000) == 0)
+		fputs("          Character level exchange\n", stdout);
+	else if ((us & 0x00070000) == 0x00010000)
 		fputs("          TPDU level exchange\n", stdout);
-	else if ((us & 0x00020000))
+	else if ((us & 0x00070000) == 0x00020000)
 		fputs("          Short APDU level exchange\n", stdout);
-	else if ((us & 0x00040000))
+	else if ((us & 0x00070000) == 0x00040000)
 		fputs("          Short and extended APDU level exchange\n", stdout);
 	else if ((us & 0x00070000))
 		fputs("        WARNING: conflicting exchange levels\n", stdout);
+
+	if ((us & 0x00100000))
+		fputs("          USB wakeup on ICC insertion and removal\n", stdout);
 
 	us = convert_le_u32(buf+44);
 	printf("        dwMaxCCIDMsgLen     %5u\n", us);
@@ -3123,7 +3155,7 @@ dump_device_status(libusb_device_handle *fd, int otg, int super_speed)
 		printf("  Debug Mode\n");
 }
 
-static void dump_usb2_device_capability_desc(unsigned char *buf)
+static void dump_usb2_device_capability_desc(unsigned char *buf, bool lpm_required)
 {
 	unsigned int wide;
 
@@ -3135,8 +3167,10 @@ static void dump_usb2_device_capability_desc(unsigned char *buf)
 			"    bDevCapabilityType  %5u\n"
 			"    bmAttributes   0x%08x\n",
 			buf[0], buf[1], buf[2], wide);
-	if (!(wide & 0x02))
+	if ((lpm_required || (wide & 0x04)) && !(wide & 0x02))
 		printf("      (Missing must-be-set LPM bit!)\n");
+	else if (!lpm_required && !(wide & 0x02))
+		printf("      Link Power Management (LPM) not supported\n");
 	else if (!(wide & 0x04))
 		printf("      HIRD Link Power Management (LPM)"
 				" Supported\n");
@@ -3429,12 +3463,12 @@ static void dump_billboard_alt_mode_capability_desc(unsigned char *buf)
 			"    bDescriptorType         %5u\n"
 			"    bDevCapabilityType      %5u\n"
 			"    bIndex                  %5u\n"
-			"    dwAlternateModeVdo          0x%02X%02X%02X%02X\n",
+			"    dwAlternateModeVdo          0x%08X\n",
 			buf[0], buf[1], buf[2], buf[3],
-			buf[4], buf[5], buf[6], buf[7]);
+			convert_le_u32(&buf[4]));
 }
 
-static void dump_bos_descriptor(libusb_device_handle *fd, bool* has_ssp)
+static void dump_bos_descriptor(libusb_device_handle *fd, bool* has_ssp, bool lpm_required)
 {
 	/* Total length of BOS descriptors varies.
 	 * Read first static 5 bytes which include the total length before
@@ -3501,7 +3535,7 @@ static void dump_bos_descriptor(libusb_device_handle *fd, bool* has_ssp)
 			/* FIXME */
 			break;
 		case USB_DC_20_EXTENSION:
-			dump_usb2_device_capability_desc(buf);
+			dump_usb2_device_capability_desc(buf, lpm_required);
 			break;
 		case USB_DC_SUPERSPEED:
 			dump_ss_device_capability_desc(buf);
@@ -3585,7 +3619,7 @@ static void dumpdev(libusb_device *dev)
 		return;
 
 	if (desc.bcdUSB >= 0x0201)
-		dump_bos_descriptor(udev, &has_ssp);
+		dump_bos_descriptor(udev, &has_ssp, desc.bcdUSB >= 0x0210);
 	if (desc.bDeviceClass == LIBUSB_CLASS_HUB)
 		do_hub(udev, desc.bDeviceProtocol, desc.bcdUSB, has_ssp);
 	if (desc.bcdUSB == 0x0200) {
@@ -3688,7 +3722,7 @@ static int list_devices(libusb_context *ctx, int busnum, int devnum, int vendori
 			dumpdev(dev);
 	}
 
-	libusb_free_device_list(list, 0);
+	libusb_free_device_list(list, 1);
 error:
 	return status;
 }
@@ -3720,7 +3754,7 @@ int main(int argc, char *argv[])
 			long_options, NULL)) != EOF) {
 		switch (c) {
 		case 'V':
-			printf("lsusb (" PACKAGE ") " VERSION "\n");
+			printf("lsusb (" PACKAGE_NAME ") " VERSION "\n");
 			return EXIT_SUCCESS;
 		case 'v':
 			verblevel++;
