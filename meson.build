@@ -1,28 +1,79 @@
 # SPDX-License-Identifier: GPL-2.0-only
 # Copyright (c) 2024 Greg Kroah-Hartman <gregkh@linuxfoundation.org>
 
-project('usbutils', 'c', version: '018')
+project(
+  'usbutils',
+  'c',
+  version: '018',
+  license: ['GPL-2.0-only', 'GPL-2.0-or-later','GPL-2.0-or-later'],
+  meson_version : '>=0.60.0',
+  default_options : ['c_std=gnu99', 'warning_level=2', 'prefix=/usr']
+)
 
 pkg = import('pkgconfig')
 
 # Compiler stuff
 cc = meson.get_compiler('c')
 
-# Note, when building with autotools, the default autogen.sh script had these C
-# flags set, we should probably also enable them, if not more, here as well in
-# the future.
-  #MYCFLAGS="-g -Wall \
-  # -Wmissing-declarations -Wmissing-prototypes \
-  #-Wnested-externs -Wpointer-arith \
-  #-Wpointer-arith -Wsign-compare -Wchar-subscripts \
-  #-Wstrict-prototypes -Wshadow \
-  #-Wformat=2 -Wtype-limits"
+add_project_arguments(
+  cc.get_supported_arguments([
+    '-Wbad-function-cast',
+    '-Wcast-align',
+    '-Wchar-subscripts',
+    '-Wempty-body',
+    '-Wformat',
+    '-Wformat=2',
+    '-Wformat-nonliteral',
+    '-Wformat-security',
+    '-Wformat-y2k',
+    '-Winit-self',
+    '-Winline',
+    '-Wint-conversion',
+    '-Wmissing-declarations',
+    '-Wmissing-format-attribute',
+    '-Wmissing-include-dirs',
+    '-Wmissing-prototypes',
+    '-Wmissing-noreturn',
+    '-Wnested-externs',
+    '-Wold-style-definition',
+    '-Wold-style-declaration',
+    '-Wpointer-arith',
+    '-Wredundant-decls',
+    '-Wshadow',
+    '-Wsign-compare',
+    #'-Wsuggest-attribute=const',
+    #'-Wsuggest-attribute=noreturn',
+    #'-Wsuggest-attribute=malloc',
+    #'-Wsuggest-attribute=returns_nonnull',
+    '-Wstrict-prototypes',
+    '-Wswitch',
+    '-Wtype-limits',
+    '-Wundef',
+    '-Wuninitialized',
+    '-Wunused',
+    '-Wunused-variable',
+    '-Wvla',
+    '-Wwrite-strings',
+    '-fdiagnostics-color=auto',
+    # warnings disabled on purpose
+    '-Wno-unused-parameter',
+    '-Wno-unused-function',
+    '-Wno-deprecated-declarations',
+    # should be removed and the code fixed
+    '-Wno-discarded-qualifiers',
+    '-Wno-incompatible-pointer-types-discards-qualifiers',
+    '-Wno-missing-field-initializers',
+  ]),
+  language: 'c',
+)
 
 # Configuration information
 config = configuration_data()
 config.set_quoted('PACKAGE_NAME', meson.project_name())
 config.set_quoted('VERSION', meson.project_version())
-configure_file(output: 'config.h', configuration: config)
+config_h = configure_file(output: 'config.h', configuration: config)
+
+add_project_arguments('-include', 'config.h', language : 'c')
 
 # Build usbhid-dump in a subdir
 subdir('usbhid-dump')
@@ -35,15 +86,8 @@ mandir = join_paths(get_option('prefix'), get_option('mandir'))
 man1dir = join_paths(mandir, 'man1')
 man8dir = join_paths(mandir, 'man8')
 
-# This can probably be cleaned up a lot to work on a list
-# instead of doing it by hand.
-usb_devices_man = configure_file(input: files('usb-devices.1.in'), output: 'usb-devices.1', configuration: config)
-lsusb_py_man    = configure_file(input: files('lsusb.py.1.in'),    output: 'lsusb.py.1',    configuration: config)
-install_man([usb_devices_man, lsusb_py_man], install_dir: man1dir)
-
-lsusb_man       = configure_file(input: files('lsusb.8.in'),       output: 'lsusb.8',       configuration: config)
-usbhid_dump_man = configure_file(input: files('usbhid-dump.8.in'), output: 'usbhid-dump.8', configuration: config)
-install_man([lsusb_man, usbhid_dump_man], install_dir: man8dir)
+install_man(files('usb-devices.1', 'lsusb.py.1'), install_dir: man1dir)
+install_man(files('lsusb.8', 'usbhid-dump.8'), install_dir: man8dir)
 
 
 ##########################
@@ -68,7 +112,7 @@ lsusb_sources = [
 ]
 
 libudev = dependency('libudev', version: '>= 196')
-libusb = dependency('libusb-1.0', version: '>= 1.0.12')
+libusb = dependency('libusb-1.0', version: '>= 1.0.22')
 
 executable('lsusb', lsusb_sources, dependencies: [libusb, libudev], install: true)
 
@@ -79,8 +123,6 @@ executable('lsusb', lsusb_sources, dependencies: [libusb, libudev], install: tru
 usbreset_sources = [
   'usbreset.c'
 ]
-
-usbreset_man = configure_file(input: files('usbreset.1.in'), output: 'usbreset.1', configuration: config)
 
 # By default, usbreset does not get installed as it could cause problems, it's
 # in the repo for those that wish to try it out.
@@ -100,11 +142,6 @@ install_data(usb_devices_sources, install_dir: get_option('bindir'), install_mod
 #############################
 # lsusb.py build instructions
 #############################
-lsusb_py_conf = configuration_data()
-lsusb_py_conf.set('VERSION', meson.project_version())
-lsusb_py_conf.set('DATADIR', get_option('datadir'))
-
-lsusb_py = configure_file(input: files('lsusb.py.in'), output: 'lsusb.py', configuration: lsusb_py_conf)
 # Also a hack, like was done for usb-devices, as this is "just" a script and
 # doesn't need to be compiled.
-install_data(lsusb_py, install_dir: get_option('bindir'), install_mode: 'rwxr-xr-x')
+install_data(files('lsusb.py'), install_dir: get_option('bindir'), install_mode: 'rwxr-xr-x')

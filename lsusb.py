@@ -1,8 +1,6 @@
 #!/usr/bin/python3
 # SPDX-License-Identifier: GPL-2.0-only OR GPL-3.0-only
 #
-# lsusb-VERSION.py
-#
 # Displays your USB devices in reasonable form.
 #
 # Copyright (c) 2009 Kurt Garloff <garloff@suse.de>
@@ -29,7 +27,6 @@ showwakeup = False
 
 prefix = "/sys/bus/usb/devices/"
 usbids = [
-	"@DATADIR@/usb.ids",
 	"/usr/share/hwdata/usb.ids",
 	"/usr/share/usb.ids",
 ]
@@ -67,7 +64,7 @@ def myenum(*args):
 	return type('MyEnum', (), enums)
 
 def parse_usb_ids():
-	"Parse /usr/share/usb.ids and fill usbvendors, usbproducts, usbclasses"
+	"Parse /usr/share/{hwdata/,}usb.ids and fill usbvendors, usbproducts, usbclasses"
 	vid = 0
 	did = 0
 	modes = myenum('Vendor', 'Class', 'Misc')
@@ -470,7 +467,7 @@ def usage():
 	print("  -C, --no-color        disable colors")
 	print("  -e, --endpoints       display endpoint info")
 	print("  -f FILE, --usbids-path FILE")
-	print("                        override filename for /usr/share/usb.ids")
+	print("                        override filename for /usr/share/{hwdata/,}usb.ids")
 	print("  -w, --wakeup          display power wakeup setting")
 	print()
 	print("Use lsusb.py -ciu to get a nice overview of your USB devices.")
