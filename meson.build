@@ -59,10 +59,6 @@ add_project_arguments(
     '-Wno-unused-parameter',
     '-Wno-unused-function',
     '-Wno-deprecated-declarations',
-    # should be removed and the code fixed
-    '-Wno-discarded-qualifiers',
-    '-Wno-incompatible-pointer-types-discards-qualifiers',
-    '-Wno-missing-field-initializers',
   ]),
   language: 'c',
 )
@@ -75,19 +71,11 @@ config_h = configure_file(output: 'config.h', configuration: config)
 
 add_project_arguments('-include', 'config.h', language : 'c')
 
-# Build usbhid-dump in a subdir
-subdir('usbhid-dump')
-
 
 #####################
 # man page generation
 #####################
-mandir = join_paths(get_option('prefix'), get_option('mandir'))
-man1dir = join_paths(mandir, 'man1')
-man8dir = join_paths(mandir, 'man8')
-
-install_man(files('usb-devices.1', 'lsusb.py.1'), install_dir: man1dir)
-install_man(files('lsusb.8', 'usbhid-dump.8'), install_dir: man8dir)
+install_man(['man/lsusb.8', 'man/lsusb.py.1', 'man/usb-devices.1', 'man/usbhid-dump.8'])
 
 
 ##########################
@@ -98,7 +86,6 @@ lsusb_sources = [
   'desc-defs.h',
   'desc-dump.c',
   'desc-dump.h',
-  'list.h',
   'lsusb-t.c',
   'lsusb.c',
   'lsusb.h',
@@ -109,6 +96,12 @@ lsusb_sources = [
   'usb-spec.h',
   'usbmisc.c',
   'usbmisc.h',
+  'ccan/check_type/check_type.h',
+  'ccan/config.h',
+  'ccan/container_of/container_of.h',
+  'ccan/str/str_debug.h',
+  'ccan/str/str.h',
+  'ccan/list/list.h',
 ]
 
 libudev = dependency('libudev', version: '>= 196')
@@ -116,6 +109,23 @@ libusb = dependency('libusb-1.0', version: '>= 1.0.22')
 
 executable('lsusb', lsusb_sources, dependencies: [libusb, libudev], install: true)
 
+################################
+# usbhid-dump build instructions
+################################
+usbhid_sources = [
+  'usbhid-dump/dev.c',
+  'usbhid-dump/dev.h',
+  'usbhid-dump/dev_list.c',
+  'usbhid-dump/dev_list.h',
+  'usbhid-dump/iface.c',
+  'usbhid-dump/iface.h',
+  'usbhid-dump/iface_list.c',
+  'usbhid-dump/iface_list.h',
+  'usbhid-dump/misc.h',
+  'usbhid-dump/usbhid-dump.c',
+]
+
+executable('usbhid-dump', usbhid_sources, dependencies: libusb, install: true)
 
 ##############################
 # usbreset build instructions
