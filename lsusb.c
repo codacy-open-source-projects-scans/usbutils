@@ -117,30 +117,19 @@
 
 unsigned int verblevel = VERBLEVEL_DEFAULT;
 static int do_report_desc = 1;
-static const char * const encryption_type[] = {
-	"UNSECURE",
-	"WIRED",
-	"CCM_1",
-	"RSA_1",
-	"RESERVED"
+static const char *const encryption_type[] = {
+	"INSECURE", "WIRED", "CCM_1", "RSA_1", "RESERVED",
 };
 
-static const char * const vconn_power[] = {
-	"1W",
-	"1.5W",
-	"2W",
-	"3W",
-	"4W",
-	"5W",
-	"6W",
-	"reserved"
+static const char *const vconn_power[] = {
+	"1W", "1.5W", "2W", "3W", "4W", "5W", "6W", "reserved",
 };
 
-static const char * const alt_mode_state[] = {
+static const char *const alt_mode_state[] = {
 	"Unspecified Error",
 	"Alternate Mode configuration not attempted",
 	"Alternate Mode configuration attempted but unsuccessful",
-	"Alternate Mode configuration successful"
+	"Alternate Mode configuration successful",
 };
 
 static void dump_interface(libusb_device_handle *dev, const struct libusb_interface *interface);
@@ -149,6 +138,7 @@ static void dump_audiocontrol_interface(libusb_device_handle *dev, const unsigne
 static void dump_audiostreaming_interface(libusb_device_handle *dev, const unsigned char *buf, int protocol);
 static void dump_midistreaming_interface(libusb_device_handle *dev, const unsigned char *buf);
 static void dump_videocontrol_interface(libusb_device_handle *dev, const unsigned char *buf, int protocol);
+static void dump_videocontrol_interrupt_endpoint(const unsigned char *buf);
 static void dump_videostreaming_interface(const unsigned char *buf);
 static void dump_dfu_interface(const unsigned char *buf);
 static void dump_comm_descriptor(libusb_device_handle *dev, const unsigned char *buf, const char *indent);
@@ -770,6 +760,10 @@ static void dump_endpoint(libusb_device_handle *dev, const struct libusb_interfa
 					dump_audiostreaming_endpoint(dev, buf, interface->bInterfaceProtocol);
 				else if (interface->bInterfaceClass == 1 && interface->bInterfaceSubClass == 3)
 					dump_midistreaming_endpoint(buf);
+				else if (interface->bInterfaceClass == 14 &&
+					 interface->bInterfaceSubClass == 1)
+					dump_videocontrol_interrupt_endpoint(
+						buf);
 				break;
 			case USB_DT_CS_INTERFACE:
 				/* MISPLACED DESCRIPTOR ... less indent */
@@ -1536,32 +1530,76 @@ static void dump_midistreaming_endpoint(const unsigned char *buf)
 
 static void dump_videocontrol_interface(libusb_device_handle *dev, const unsigned char *buf, int protocol)
 {
-	static const char * const ctrlnames[] = {
-		"Brightness", "Contrast", "Hue", "Saturation", "Sharpness", "Gamma",
-		"White Balance Temperature", "White Balance Component", "Backlight Compensation",
-		"Gain", "Power Line Frequency", "Hue, Auto", "White Balance Temperature, Auto",
-		"White Balance Component, Auto", "Digital Multiplier", "Digital Multiplier Limit",
-		"Analog Video Standard", "Analog Video Lock Status", "Contrast, Auto"
+	static const char *const ctrlnames[] = {
+		"Brightness",
+		"Contrast",
+		"Hue",
+		"Saturation",
+		"Sharpness",
+		"Gamma",
+		"White Balance Temperature",
+		"White Balance Component",
+		"Backlight Compensation",
+		"Gain",
+		"Power Line Frequency",
+		"Hue, Auto",
+		"White Balance Temperature, Auto",
+		"White Balance Component, Auto",
+		"Digital Multiplier",
+		"Digital Multiplier Limit",
+		"Analog Video Standard",
+		"Analog Video Lock Status",
+		"Contrast, Auto",
 	};
-	static const char * const camctrlnames[] = {
-		"Scanning Mode", "Auto-Exposure Mode", "Auto-Exposure Priority",
-		"Exposure Time (Absolute)", "Exposure Time (Relative)", "Focus (Absolute)",
-		"Focus (Relative)", "Iris (Absolute)", "Iris (Relative)", "Zoom (Absolute)",
-		"Zoom (Relative)", "PanTilt (Absolute)", "PanTilt (Relative)",
-		"Roll (Absolute)", "Roll (Relative)", "Reserved", "Reserved", "Focus, Auto",
-		"Privacy", "Focus, Simple", "Window", "Region of Interest"
+	static const char *const camctrlnames[] = {
+		"Scanning Mode",
+		"Auto-Exposure Mode",
+		"Auto-Exposure Priority",
+		"Exposure Time (Absolute)",
+		"Exposure Time (Relative)",
+		"Focus (Absolute)",
+		"Focus (Relative)",
+		"Iris (Absolute)",
+		"Iris (Relative)",
+		"Zoom (Absolute)",
+		"Zoom (Relative)",
+		"PanTilt (Absolute)",
+		"PanTilt (Relative)",
+		"Roll (Absolute)",
+		"Roll (Relative)",
+		"Reserved",
+		"Reserved",
+		"Focus, Auto",
+		"Privacy",
+		"Focus, Simple",
+		"Window",
+		"Region of Interest",
 	};
-	static const char * const enctrlnames[] = {
-		"Select Layer", "Profile and Toolset", "Video Resolution", "Minimum Frame Interval",
-		"Slice Mode", "Rate Control Mode", "Average Bit Rate", "CPB Size", "Peak Bit Rate",
-		"Quantization Parameter", "Synchronization and Long-Term Reference Frame",
-		"Long-Term Buffer", "Picture Long-Term Reference", "LTR Validation",
-		"Level IDC", "SEI Message", "QP Range", "Priority ID", "Start or Stop Layer/View",
-		"Error Resiliency"
+	static const char *const enctrlnames[] = {
+		"Select Layer",
+		"Profile and Toolset",
+		"Video Resolution",
+		"Minimum Frame Interval",
+		"Slice Mode",
+		"Rate Control Mode",
+		"Average Bit Rate",
+		"CPB Size",
+		"Peak Bit Rate",
+		"Quantization Parameter",
+		"Synchronization and Long-Term Reference Frame",
+		"Long-Term Buffer",
+		"Picture Long-Term Reference",
+		"LTR Validation",
+		"Level IDC",
+		"SEI Message",
+		"QP Range",
+		"Priority ID",
+		"Start or Stop Layer/View",
+		"Error Resiliency",
 	};
-	static const char * const stdnames[] = {
-		"None", "NTSC - 525/60", "PAL - 625/50", "SECAM - 625/50",
-		"NTSC - 625/50", "PAL - 525/60" };
+	static const char *const stdnames[] = {
+		"None", "NTSC - 525/60", "PAL - 625/50", "SECAM - 625/50", "NTSC - 625/50", "PAL - 525/60",
+	};
 	unsigned int i, ctrls, stds, n, p, termt, freq;
 	char *term = NULL, termts[128];
 
@@ -1753,6 +1791,25 @@ static void dump_videocontrol_interface(libusb_device_handle *dev, const unsigne
 	}
 
 	free(term);
+}
+
+static void dump_videocontrol_interrupt_endpoint(const unsigned char *buf)
+{
+	unsigned int wMaxTransferSize;
+
+	if (buf[0] < 5)
+		printf("      Warning: Descriptor too short\n");
+	if (buf[1] != USB_DT_CS_ENDPOINT)
+		printf("      Warning: Invalid descriptor\n");
+	wMaxTransferSize = buf[3] | (buf[4] << 8);
+	printf("        VideoControl Endpoint Descriptor:\n"
+	       "          bLength             %5u\n"
+	       "          bDescriptorType     %5u\n"
+	       "          bDescriptorSubtype  %5u (%s)\n"
+	       "          wMaxTransferSize    %5u\n",
+	       buf[0], buf[1], buf[2], buf[2] == 3 ? "EP_INTERRUPT" : "Invalid",
+	       wMaxTransferSize);
+	dump_junk(buf, "          ", 5);
 }
 
 static void dump_videostreaming_interface(const unsigned char *buf)
