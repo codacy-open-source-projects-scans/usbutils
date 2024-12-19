@@ -2736,7 +2736,41 @@ dump_comm_descriptor(libusb_device_handle *dev, const unsigned char *buf, const 
 		       indent,
 		       indent, buf[3], (buf[3] && *str) ? str : "(?\?)",
 		       indent, tmp);
-		/* FIXME dissect ALL 28 bits */
+		/* TODO
+		 * Translate all 28 bits of bmEthernetStatistics into something "real"  Here's the bitfields if someone
+		 * wants to do this in the future.  As specified in the USB CDC ECM Subclass document, version 1.2,
+		 * table 4:
+		 * D00	XMIT_OK			Frames transmitted without errors
+		 * D01	RVC_OK			Frames received without errors
+		 * D02	XMIT_ERROR		Frames not transmitted, or transmitted with errors
+		 * D03	RCV_ERROR		Frames received with errors that are not delivered to the USB host.
+		 * D04	RCV_NO_BUFFER		Frame missed, no buffers
+		 * D05	DIRECTED_BYTES_XMIT	Directed bytes transmitted without errors
+		 * D06	DIRECTED_FRAMES_XMIT	Directed frames transmitted without errors
+		 * D07	MULTICAST_BYTES_XMIT	Multicast bytes transmitted without errors
+		 * D08	MULTICAST_FRAMES_XMIT	Multicast frames transmitted without errors
+		 * D09	BROADCAST_BYTES_XMIT	Broadcast bytes transmitted without errors
+		 * D10	BROADCAST_FRAMES_XMIT	Broadcast frames transmitted without errors
+		 * D11	DIRECTED_BYTES_RCV	Directed bytes received without errors
+		 * D12	DIRECTED_FRAMES_RCV	Directed frames received without errors
+		 * D13	MULTICAST_BYTES_RCV	Multicast bytes received without errors
+		 * D14	MULTICAST_FRAMES_RCV	Multicast frames received without errors
+		 * D15	BROADCAST_BYTES_RCV	Broadcast bytes received without errors
+		 * D16	BROADCAST_FRAMES_RCV	Broadcast frames received without errors
+		 * D17	RCV_CRC_ERROR		Frames received with circular redundancy check (CRC) or frame check sequence (FCS) error
+		 * D18	TRANSMIT_QUEUE_LENGTH	Length of transmit queue
+		 * D19	RCV_ERROR_ALIGNMENT	Frames received with alignment error
+		 * D20	XMIT_ONE_COLLISION	Frames transmitted with one collision
+		 * D21	XMIT_MORE_COLLISIONS	Frames transmitted with more than one collision
+		 * D22	XMIT_DEFERRED		Frames transmitted after deferral
+		 * D23	XMIT_MAX_COLLISIONS	Frames not transmitted due to collisions
+		 * D24	RCV_OVERRUN		Frames not received due to overrun
+		 * D25	XMIT_UNDERRUN		Frames not transmitted due to underrun
+		 * D26	XMIT_HEARTBEAT_FAILURE	Frames transmitted with heartbeat failure
+		 * D27	XMIT_TIMES_CRS_LOST	Times carrier sense signal lost during transmission
+		 * D28	XMIT_LATE_COLLISIONS	Late collisions detected
+		 * D29-D31 Reserved		Must be set to 0
+		 */
 		printf("%s  wMaxSegmentSize         %10d\n"
 		       "%s  wNumberMCFilters            0x%04x\n"
 		       "%s  bNumberPowerFilters     %10d\n",
@@ -2877,7 +2911,11 @@ dump_comm_descriptor(libusb_device_handle *dev, const unsigned char *buf, const 
 		       indent, buf[6] | (buf[7] << 8));
 		break;
 	default:
-		/* FIXME there are about a dozen more descriptor types */
+		/*
+		 * There are about a dozen more descriptor types, if anyone has
+		 * a device with them in it, we'll add them here in the future
+		 * if * really needed.
+		 */
 		printf("%sUNRECOGNIZED CDC: ", indent);
 		dump_bytes(buf, buf[0]);
 		return;
@@ -3070,7 +3108,7 @@ static void do_dualspeed(libusb_device_handle *fd)
 	       buf[6], proto,
 	       buf[7], buf[8]);
 
-	/* FIXME also show the OTHER_SPEED_CONFIG descriptors */
+	/* TODO also show the OTHER_SPEED_CONFIG descriptors */
 }
 
 static void do_debug(libusb_device_handle *fd)
@@ -3217,7 +3255,10 @@ dump_device_status(libusb_device_handle *fd, int otg, int super_speed)
 
 static void dump_usb2_device_capability_desc(unsigned char *buf, bool lpm_required)
 {
+	static const uint16_t besl_us[16] = { 125,  150,  200,	300,  400,  500,  1000, 2000,
+					      3000, 4000, 5000, 6000, 7000, 8000, 9000, 10000 };
 	unsigned int wide;
+	unsigned int besl;
 
 	wide = buf[3] + (buf[4] << 8) +
 		(buf[5] << 16) + (buf[6] << 24);
@@ -3232,16 +3273,17 @@ static void dump_usb2_device_capability_desc(unsigned char *buf, bool lpm_requir
 	else if (!lpm_required && !(wide & 0x02))
 		printf("      Link Power Management (LPM) not supported\n");
 	else if (!(wide & 0x04))
-		printf("      HIRD Link Power Management (LPM)"
-				" Supported\n");
+		printf("      HIRD Link Power Management (LPM) Supported\n");
 	else {
-		printf("      BESL Link Power Management (LPM)"
-				" Supported\n");
-		if (wide & 0x08)
-			printf("    BESL value    %5u us \n", wide & 0xf00);
-		if (wide & 0x10)
-			printf("    Deep BESL value    %5u us \n",
-					wide & 0xf000);
+		printf("      BESL Link Power Management (LPM) Supported\n");
+		if (wide & 0x08) {
+			besl = (wide & 0xf00) >> 8;
+			printf("      Baseline BESL value  %5hu us \n", besl_us[besl]);
+		}
+		if (wide & 0x10) {
+			besl = (wide & 0xf000) >> 12;
+			printf("      Deep BESL value      %5hu us \n", besl_us[besl]);
+		}
 	}
 }
 
@@ -3592,7 +3634,7 @@ static void dump_bos_descriptor(libusb_device_handle *fd, bool* has_ssp, bool lp
 		}
 		switch (buf[2]) {
 		case USB_DC_WIRELESS_USB:
-			/* FIXME */
+			/* It's dead!  Luckily no one has these devices so we can ignore it. */
 			break;
 		case USB_DC_20_EXTENSION:
 			dump_usb2_device_capability_desc(buf, lpm_required);
