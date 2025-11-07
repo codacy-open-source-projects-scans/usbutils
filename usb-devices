@@ -100,8 +100,8 @@ print_interface() {
 		driver="(none)"
 	fi
 	classname=$(class_decode "$class")
-	printf "I:  If#=%2i Alt=%2i #EPs=%2i Cls=%s(%s) Sub=%s Prot=%s Driver=%s\n" \
-		"0x${ifnum#0}" "${altset#0}" "0x${numeps#0}" "$class" "$classname" "$subclass" \
+	printf "I:  If#=%2i Alt=%2s #EPs=%2i Cls=%s(%s) Sub=%s Prot=%s Driver=%s\n" \
+		"0x${ifnum#0}" "${altset}" "0x${numeps#0}" "$class" "$classname" "$subclass" \
 		"$protocol" "$driver"
 
 	for endpoint in "$ifpath"/ep_??
@@ -113,10 +113,11 @@ print_interface() {
 }
 
 print_device() {
-	local devpath=$1
-	local parent=$2
-	local level=$3
-	local count=$4
+	local devpath="$1"
+	local parent="$2"
+	local level="$3"
+	local count="$4"
+	local devnum
 
 	[ -d "$devpath" ] || return
 	cd "$devpath" || return
@@ -173,7 +174,7 @@ print_device() {
 		print_interface "$devpath/$interface"
 	done
 
-	devcount=0
+	local devcount=0
 	for subdev in "$busnum"-*
 	do
 		echo "$subdev" | grep -Eq "^$busnum-[0-9]+(\.[0-9]+)*$" \
