@@ -20,11 +20,22 @@ static const char *devbususb = "/dev/bus/usb";
 
 /* ---------------------------------------------------------------------- */
 
-static int readlink_recursive(const char *path, char *buf, size_t bufsize)
+/* SYMLOOP_MAX is typically 40 on Linux (MAXSYMLINKS) */
+#define MAX_READLINK_DEPTH 40
+
+static int readlink_recursive_depth(const char *path, char *buf,
+				    size_t bufsize, int depth)
 {
 	char temp[PATH_MAX + 1];
 	char *ptemp;
 	int ret;
+	size_t remaining;
+
+	if (depth > MAX_READLINK_DEPTH) {
+		strncpy(buf, path, bufsize);
+		buf[bufsize - 1] = '\0';
+		return strlen(buf);
+	}
 
 	ret = readlink(path, buf, bufsize-1);
 
@@ -32,19 +43,29 @@ static int readlink_recursive(const char *path, char *buf, size_t bufsize)
 		buf[ret] = 0;
 		if (*buf != '/') {
 			strncpy(temp, path, sizeof(temp) - 1);
+			temp[sizeof(temp) - 1] = '\0';
 			ptemp = temp + strlen(temp);
 			while (*ptemp != '/' && ptemp != temp)
 				ptemp--;
 			ptemp++;
-			strncpy(ptemp, buf, bufsize + temp - ptemp - 1);
-		} else
+			remaining = sizeof(temp) - (ptemp - temp) - 1;
+			strncpy(ptemp, buf, remaining);
+			ptemp[remaining] = '\0';
+		} else {
 			strncpy(temp, buf, sizeof(temp) - 1);
-		return readlink_recursive(temp, buf, bufsize);
+			temp[sizeof(temp) - 1] = '\0';
+		}
+		return readlink_recursive_depth(temp, buf, bufsize, depth + 1);
 	} else {
 		strncpy(buf, path, bufsize);
-		buf[bufsize - 1] = 0;
+		buf[bufsize - 1] = '\0';
 		return strlen(buf);
 	}
+}
+
+static int readlink_recursive(const char *path, char *buf, size_t bufsize)
+{
+	return readlink_recursive_depth(path, buf, bufsize, 0);
 }
 
 static char *get_absolute_path(const char *path, char *result,
@@ -62,11 +83,15 @@ static char *get_absolute_path(const char *path, char *result,
 
 	if (*ppath != '/') {
 		result = getcwd(result, result_size);
+		if (!result)
+			return NULL;
 		presult += strlen(result);
 		result_size -= strlen(result);
 
-		*presult++ = '/';
-		result_size--;
+		if (result_size > 1) {
+			*presult++ = '/';
+			result_size--;
+		}
 	}
 
 	while (*ppath != 0 && result_size > 1) {
@@ -114,6 +139,8 @@ libusb_device *get_usb_device(libusb_context *ctx, const char *path)
 
 	dev = NULL;
 	num_devs = libusb_get_device_list(ctx, &list);
+	if (num_devs < 0)
+		return NULL;
 
 	for (i = 0; i < num_devs; ++i) {
 		uint8_t bnum = libusb_get_bus_number(list[i]);
@@ -134,7 +161,11 @@ libusb_device *get_usb_device(libusb_context *ctx, const char *path)
 static char *get_dev_string_ascii(libusb_device_handle *dev, size_t size,
                                   uint8_t id)
 {
-	char *buf = malloc(size);
+	char *buf = calloc(1, size);
+
+	if (!buf)
+		return strdup("(error)");
+
 	int ret = libusb_get_string_descriptor_ascii(dev, id,
 	                                             (unsigned char *) buf,
 	                                             size);
@@ -149,7 +180,7 @@ static char *get_dev_string_ascii(libusb_device_handle *dev, size_t size,
 
 static uint16_t get_any_langid(libusb_device_handle *dev)
 {
-	unsigned char buf[4];
+	unsigned char buf[4] = {0};
 	int ret = libusb_get_string_descriptor(dev, 0, 0, buf, sizeof buf);
 
 	if (ret != sizeof buf)
@@ -172,6 +203,11 @@ static char *usb_string_to_native(char * str, size_t len)
 	in_bytes_left = len * 2;
 	out_bytes_left = len * MB_CUR_MAX;
 	result = result_end = malloc(out_bytes_left + 1);
+
+	if (!result) {
+		iconv_close(conv);
+		return NULL;
+	}
 
 	num_converted = iconv(conv, &str, &in_bytes_left,
 	                      &result_end, &out_bytes_left);
@@ -216,7 +252,11 @@ char *get_dev_string(libusb_device_handle *dev, uint8_t id)
 	buf = usb_string_to_native(unicode_buf + 2,
 	                           ((unsigned char) unicode_buf[0] - 2) / 2);
 	if (!buf)
-		return get_dev_string_ascii(dev, 127, id);
+		buf = get_dev_string_ascii(dev, 127, id);
+
+	for (char *p = buf; *p; p++)
+		if ((unsigned char)*p < 0x20 || *p == 0x7f)
+			*p = '?';
 
 	return buf;
 }

@@ -46,6 +46,10 @@ static char *sysfs_attr(const char *dev, const char *attr)
 	while (--len > 0 && isspace(buf[len]))
 		buf[len] = 0;
 
+	for (int i = 0; i <= len; i++)
+		if ((unsigned char)buf[i] < 0x20 || buf[i] == 0x7f)
+			buf[i] = '?';
+
 	return (len >= 0) ? buf : NULL;
 }
 
@@ -138,7 +142,9 @@ static struct usbentry *find_device(int *bus, int *dev, int *vid, int *pid, cons
 {
 	DIR *devs = opendir("/sys/bus/usb/devices");
 
-	struct usbentry *e, *match = NULL;
+	struct usbentry *e;
+	static struct usbentry match;
+	int found = 0;
 
 	if (!devs)
 		return NULL;
@@ -147,18 +153,24 @@ static struct usbentry *find_device(int *bus, int *dev, int *vid, int *pid, cons
 		if ((bus && (e->bus_num == *bus) && (e->dev_num == *dev)) ||
 		    (vid && (e->vendor_id == *vid) && (e->product_id == *pid)) ||
 		    (serial && !strcasecmp(e->serial, serial)) || (product && !strcasecmp(e->product_name, product))) {
-			match = e;
-			break;
+			if (found++) {
+				fprintf(stderr,
+					"Multiple devices match; specify the bus/device number (BBB/DDD).\n");
+				closedir(devs);
+				return NULL;
+			}
+			match = *e;
 		}
 
 	closedir(devs);
 
-	return match;
+	return found ? &match : NULL;
 }
 
-static void reset_device(struct usbentry *dev)
+static int reset_device(struct usbentry *dev)
 {
 	int fd;
+	int ret = EXIT_FAILURE;
 	char path[PATH_MAX];
 
 	snprintf(path, sizeof(path) - 1, "/dev/bus/usb/%03d/%03d", dev->bus_num, dev->dev_num);
@@ -169,13 +181,17 @@ static void reset_device(struct usbentry *dev)
 	if (fd > -1) {
 		if (ioctl(fd, USBDEVFS_RESET, 0) < 0)
 			printf("failed [%s]\n", strerror(errno));
-		else
+		else {
 			printf("ok\n");
+			ret = EXIT_SUCCESS;
+		}
 
 		close(fd);
 	} else {
 		printf("can't open [%s]\n", strerror(errno));
 	}
+
+	return ret;
 }
 
 int main(int argc, char **argv)
@@ -207,6 +223,5 @@ int main(int argc, char **argv)
 		return 1;
 	}
 
-	reset_device(dev);
-	return 0;
+	return reset_device(dev);
 }

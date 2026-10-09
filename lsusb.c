@@ -57,6 +57,7 @@
 #define USB_DC_BILLBOARD		0x0d
 #define USB_DC_BILLBOARD_ALT_MODE	0x0f
 #define USB_DC_CONFIGURATION_SUMMARY	0x10
+#define USB_DC_FWSTATUS_CAPABILITY	0x11
 
 /* Conventional codes for class-specific descriptors.  The convention is
  * defined in the USB "Common Class" Spec (3.11).  Individual class specs
@@ -145,7 +146,7 @@ static void dump_comm_descriptor(libusb_device_handle *dev, const unsigned char 
 static void dump_hid_device(libusb_device_handle *dev, const struct libusb_interface_descriptor *interface, const unsigned char *buf);
 static void dump_printer_device(libusb_device_handle *dev, const struct libusb_interface_descriptor *interface, const unsigned char *buf);
 static void dump_audiostreaming_endpoint(libusb_device_handle *dev, const unsigned char *buf, int protocol);
-static void dump_midistreaming_endpoint(const unsigned char *buf);
+static void dump_midistreaming_endpoint(libusb_device_handle *dev, const unsigned char *buf);
 static void dump_hub(const char *prefix, const unsigned char *p, int tt_type);
 static void dump_ccid_device(const unsigned char *buf);
 static void dump_billboard_device_capability_desc(libusb_device_handle *dev, unsigned char *buf);
@@ -154,12 +155,22 @@ static void dump_billboard_device_capability_desc(libusb_device_handle *dev, uns
 
 static unsigned int convert_le_u32 (const unsigned char *buf)
 {
-	return buf[0] | (buf[1] << 8) | (buf[2] << 16) | (buf[3] << 24);
+	return buf[0] | (buf[1] << 8) | (buf[2] << 16) | ((unsigned int)buf[3] << 24);
 }
 
 static unsigned int convert_le_u16 (const unsigned char *buf)
 {
 	return buf[0] | (buf[1] << 8);
+}
+
+static bool check_descriptor_length(int size, int min)
+{
+	if (size < min) {
+		printf("      Warning: Descriptor too short, is %d, must be at least %d\n",
+		       size, min);
+		return false;
+	}
+	return true;
 }
 
 /* ---------------------------------------------------------------------- */
@@ -213,7 +224,7 @@ static const char *get_guid(const unsigned char *buf)
 	 * structure.  The first fields fields are historically big
 	 * endian numbers, dating from Apollo mc68000 workstations.
 	 */
-	sprintf(guid, "{%02x%02x%02x%02x"
+	snprintf(guid, sizeof(guid), "{%02x%02x%02x%02x"
 			"-%02x%02x"
 			"-%02x%02x"
 			"-%02x%02x"
@@ -335,6 +346,10 @@ static void dump_device(
 
 static void dump_wire_adapter(const unsigned char *buf)
 {
+	if (buf[0] < 14) {
+		printf("      Warning: Wire Adapter descriptor too short\n");
+		return;
+	}
 
 	printf("      Wire Adapter Class Descriptor:\n"
 	       "        bLength             %5u\n"
@@ -356,16 +371,23 @@ static void dump_wire_adapter(const unsigned char *buf)
 
 static void dump_rc_interface(const unsigned char *buf)
 {
+	if (buf[0] < 4) {
+		printf("      Warning: Radio Control Interface descriptor too short\n");
+		return;
+	}
 	printf("      Radio Control Interface Class Descriptor:\n"
 	       "        bLength             %5u\n"
 	       "        bDescriptorType     %5u\n"
 	       "        bcdRCIVersion       %2x.%02x\n",
 	       buf[0], buf[1], buf[3], buf[2]);
-
 }
 
 static void dump_security(const unsigned char *buf)
 {
+	if (buf[0] < 5) {
+		printf("    Warning: Security descriptor too short\n");
+		return;
+	}
 	printf("    Security Descriptor:\n"
 	       "      bLength             %5u\n"
 	       "      bDescriptorType     %5u\n"
@@ -376,7 +398,13 @@ static void dump_security(const unsigned char *buf)
 
 static void dump_encryption_type(const unsigned char *buf)
 {
-	int b_encryption_type = buf[2] & 0x4;
+	int b_encryption_type;
+
+	if (buf[0] < 5) {
+		printf("    Warning: Encryption Type descriptor too short\n");
+		return;
+	}
+	b_encryption_type = buf[2];
 
 	printf("    Encryption Type Descriptor:\n"
 	       "      bLength             %5u\n"
@@ -385,13 +413,20 @@ static void dump_encryption_type(const unsigned char *buf)
 	       "      bEncryptionValue    %5u\n"
 	       "      bAuthKeyIndex       %5u\n",
 	       buf[0], buf[1], buf[2],
-	       encryption_type[b_encryption_type], buf[3], buf[4]);
+	       b_encryption_type < (int)(sizeof(encryption_type) / sizeof(*encryption_type))
+		       ? encryption_type[b_encryption_type] : "RESERVED",
+	       buf[3], buf[4]);
 }
 
 static void dump_association(libusb_device_handle *dev, const unsigned char *buf)
 {
 	char cls[128], subcls[128], proto[128];
 	char *func;
+
+	if (buf[0] < 8) {
+		printf("    Warning: Interface Association descriptor too short\n");
+		return;
+	}
 
 	get_class_string(cls, sizeof(cls), buf[4]);
 	get_subclass_string(subcls, sizeof(subcls), buf[4], buf[5]);
@@ -458,8 +493,9 @@ static void dump_config(libusb_device_handle *dev, struct libusb_config_descript
 		const unsigned char	*buf = config->extra;
 
 		while (size >= 2) {
-			if (buf[0] < 2) {
-				dump_junk(buf, "        ", size);
+			if (buf[0] < 2 || buf[0] > size) {
+				printf("    ** Bad config-extra bLength %u (%d left)\n",
+				       buf[0], size);
 				break;
 			}
 			switch (buf[1]) {
@@ -524,8 +560,9 @@ static void dump_altsetting(libusb_device_handle *dev, const struct libusb_inter
 		size = interface->extra_length;
 		buf = interface->extra;
 		while (size >= 2 * sizeof(uint8_t)) {
-			if (buf[0] < 2) {
-				dump_junk(buf, "      ", size);
+			if (buf[0] < 2 || buf[0] > size) {
+				printf("      ** Bad interface-extra bLength %u (%u left)\n",
+				       buf[0], size);
 				break;
 			}
 
@@ -750,8 +787,9 @@ static void dump_endpoint(libusb_device_handle *dev, const struct libusb_interfa
 		size = endpoint->extra_length;
 		buf = endpoint->extra;
 		while (size >= 2 * sizeof(uint8_t)) {
-			if (buf[0] < 2) {
-				dump_junk(buf, "        ", size);
+			if (buf[0] < 2 || buf[0] > size) {
+				printf("        ** Bad endpoint-extra bLength %u (%u left)\n",
+				       buf[0], size);
 				break;
 			}
 			switch (buf[1]) {
@@ -759,7 +797,7 @@ static void dump_endpoint(libusb_device_handle *dev, const struct libusb_interfa
 				if (interface->bInterfaceClass == 1 && interface->bInterfaceSubClass == 2)
 					dump_audiostreaming_endpoint(dev, buf, interface->bInterfaceProtocol);
 				else if (interface->bInterfaceClass == 1 && interface->bInterfaceSubClass == 3)
-					dump_midistreaming_endpoint(buf);
+					dump_midistreaming_endpoint(dev, buf);
 				else if (interface->bInterfaceClass == 14 &&
 					 interface->bInterfaceSubClass == 1)
 					dump_videocontrol_interrupt_endpoint(
@@ -799,12 +837,16 @@ static void dump_endpoint(libusb_device_handle *dev, const struct libusb_interfa
 				dump_association(dev, buf);
 				break;
 			case USB_DT_SS_ENDPOINT_COMP:
+				if (buf[0] < 6) {
+					printf("        Warning: SuperSpeed Endpoint Companion descriptor too short\n");
+					break;
+				}
 				printf("        bMaxBurst %15u\n", buf[2]);
 				/* Print bulk streams info or isoc "Mult" */
 				if ((endpoint->bmAttributes & 3) == 2 &&
 						(buf[3] & 0x1f))
 					printf("        MaxStreams %14u\n",
-							(unsigned) 1 << buf[3]);
+							1U << (buf[3] & 0x1f));
 				if ((endpoint->bmAttributes & 3) == 1 &&
 						(buf[3] & 0x3))
 					printf("        Mult %20u\n",
@@ -1012,8 +1054,10 @@ static void dump_audiocontrol_interface(libusb_device_handle *dev, const unsigne
 
 	if (buf[1] != USB_DT_CS_INTERFACE)
 		printf("      Warning: Invalid descriptor\n");
-	else if (buf[0] < 3)
+	if (buf[0] < 3) {
 		printf("      Warning: Descriptor too short\n");
+		return;
+	}
 	printf("      AudioControl Interface Descriptor:\n"
 	       "        bLength             %5u\n"
 	       "        bDescriptorType     %5u\n"
@@ -1082,7 +1126,10 @@ static void dump_audiocontrol_interface(libusb_device_handle *dev, const unsigne
 	default:
 		printf("(unknown)\n"
 		       "        Invalid desc subtype:");
-		dump_bytes(buf+3, buf[0]-3);
+		if (buf[0] > 3)
+			dump_bytes(buf+3, buf[0]-3);
+		else
+			printf("\n");
 		break;
 	}
 }
@@ -1102,8 +1149,10 @@ static void dump_audiostreaming_interface(libusb_device_handle *dev, const unsig
 
 	if (buf[1] != USB_DT_CS_INTERFACE)
 		printf("      Warning: Invalid descriptor\n");
-	else if (buf[0] < 3)
+	if (buf[0] < 3) {
 		printf("      Warning: Descriptor too short\n");
+		return;
+	}
 	printf("      AudioStreaming Interface Descriptor:\n"
 	       "        bLength             %5u\n"
 	       "        bDescriptorType     %5u\n"
@@ -1116,17 +1165,25 @@ static void dump_audiostreaming_interface(libusb_device_handle *dev, const unsig
 
 	case 0x02: /* FORMAT_TYPE */
 		printf("(FORMAT_TYPE)\n");
+		if (buf[0] < 4) {
+			printf("      Warning: Descriptor too short\n");
+			break;
+		}
 		switch (protocol) {
 		case USB_AUDIO_CLASS_1:
-			if (buf[0] < 8)
+			if (buf[0] < 8) {
 				printf("      Warning: Descriptor too short\n");
+				break;
+			}
 			printf("        bFormatType         %5u ", buf[3]);
 			switch (buf[3]) {
 			case 0x01: /* FORMAT_TYPE_I */
 				printf("(FORMAT_TYPE_I)\n");
 				j = buf[7] ? (buf[7]*3+8) : 14;
-				if (buf[0] < j)
+				if (buf[0] < j) {
 					printf("      Warning: Descriptor too short\n");
+					break;
+				}
 				printf("        bNrChannels         %5u\n"
 				       "        bSubframeSize       %5u\n"
 				       "        bBitResolution      %5u\n"
@@ -1145,9 +1202,15 @@ static void dump_audiostreaming_interface(libusb_device_handle *dev, const unsig
 
 			case 0x02: /* FORMAT_TYPE_II */
 				printf("(FORMAT_TYPE_II)\n");
-				j = buf[8] ? (buf[7]*3+9) : 15;
-				if (buf[0] < j)
+				if (buf[0] < 9) {
 					printf("      Warning: Descriptor too short\n");
+					break;
+				}
+				j = buf[8] ? (buf[8]*3+9) : 15;
+				if (buf[0] < j) {
+					printf("      Warning: Descriptor too short\n");
+					break;
+				}
 				printf("        wMaxBitRate         %5u\n"
 				       "        wSamplesPerFrame    %5u\n"
 				       "        bSamFreqType        %5u %s\n",
@@ -1166,8 +1229,10 @@ static void dump_audiostreaming_interface(libusb_device_handle *dev, const unsig
 			case 0x03: /* FORMAT_TYPE_III */
 				printf("(FORMAT_TYPE_III)\n");
 				j = buf[7] ? (buf[7]*3+8) : 14;
-				if (buf[0] < j)
+				if (buf[0] < j) {
 					printf("      Warning: Descriptor too short\n");
+					break;
+				}
 				printf("        bNrChannels         %5u\n"
 				       "        bSubframeSize       %5u\n"
 				       "        bBitResolution      %5u\n"
@@ -1197,8 +1262,10 @@ static void dump_audiostreaming_interface(libusb_device_handle *dev, const unsig
 			switch (buf[3]) {
 			case 0x01: /* FORMAT_TYPE_I */
 				printf("(FORMAT_TYPE_I)\n");
-				if (buf[0] < 6)
+				if (buf[0] < 6) {
 					printf("      Warning: Descriptor too short\n");
+					break;
+				}
 				printf("        bSubslotSize        %5u\n"
 				       "        bBitResolution      %5u\n",
 				       buf[4], buf[5]);
@@ -1207,8 +1274,10 @@ static void dump_audiostreaming_interface(libusb_device_handle *dev, const unsig
 
 			case 0x02: /* FORMAT_TYPE_II */
 				printf("(FORMAT_TYPE_II)\n");
-				if (buf[0] < 8)
+				if (buf[0] < 8) {
 					printf("      Warning: Descriptor too short\n");
+					break;
+				}
 				printf("        wMaxBitRate         %5u\n"
 				       "        wSlotsPerFrame      %5u\n",
 				       buf[4] | (buf[5] << 8),
@@ -1218,8 +1287,10 @@ static void dump_audiostreaming_interface(libusb_device_handle *dev, const unsig
 
 			case 0x03: /* FORMAT_TYPE_III */
 				printf("(FORMAT_TYPE_III)\n");
-				if (buf[0] < 6)
+				if (buf[0] < 6) {
 					printf("      Warning: Descriptor too short\n");
+					break;
+				}
 				printf("        bSubslotSize        %5u\n"
 				       "        bBitResolution      %5u\n",
 				       buf[4], buf[5]);
@@ -1228,8 +1299,10 @@ static void dump_audiostreaming_interface(libusb_device_handle *dev, const unsig
 
 			case 0x04: /* FORMAT_TYPE_IV */
 				printf("(FORMAT_TYPE_IV)\n");
-				if (buf[0] < 4)
+				if (buf[0] < 4) {
 					printf("      Warning: Descriptor too short\n");
+					break;
+				}
 				printf("        bFormatType         %5u\n", buf[3]);
 				dump_junk(buf, "        ", 4);
 				break;
@@ -1247,8 +1320,10 @@ static void dump_audiostreaming_interface(libusb_device_handle *dev, const unsig
 
 	case 0x03: /* FORMAT_SPECIFIC */
 		printf("(FORMAT_SPECIFIC)\n");
-		if (buf[0] < 5)
+		if (buf[0] < 5) {
 			printf("      Warning: Descriptor too short\n");
+			break;
+		}
 		fmttag = buf[3] | (buf[4] << 8);
 		if (fmttag <= 5)
 			fmtptr = fmtItag[fmttag];
@@ -1259,8 +1334,10 @@ static void dump_audiostreaming_interface(libusb_device_handle *dev, const unsig
 		printf("        wFormatTag          %5u %s\n", fmttag, fmtptr);
 		switch (fmttag) {
 		case 0x1001: /* MPEG */
-			if (buf[0] < 8)
+			if (buf[0] < 8) {
 				printf("      Warning: Descriptor too short\n");
+				break;
+			}
 			printf("        bmMPEGCapabilities 0x%04x\n",
 			       buf[5] | (buf[6] << 8));
 			if (buf[5] & 0x01)
@@ -1320,11 +1397,13 @@ static void dump_audiostreaming_interface(libusb_device_handle *dev, const unsig
 			break;
 
 		case 0x1002: /* AC-3 */
-			if (buf[0] < 10)
+			if (buf[0] < 10) {
 				printf("      Warning: Descriptor too short\n");
+				break;
+			}
 			printf("        bmBSID         0x%08x\n"
 			       "        bmAC3Features        0x%02x\n",
-			       buf[5] | (buf[6] << 8) | (buf[7] << 16) | (buf[8] << 24), buf[9]);
+			       convert_le_u32(buf + 5), buf[9]);
 			if (buf[9] & 0x01)
 				printf("          RF mode\n");
 			if (buf[9] & 0x02)
@@ -1363,7 +1442,10 @@ static void dump_audiostreaming_interface(libusb_device_handle *dev, const unsig
 
 	default:
 		printf("        Invalid desc subtype:");
-		dump_bytes(buf+3, buf[0]-3);
+		if (buf[0] > 3)
+			dump_bytes(buf+3, buf[0]-3);
+		else
+			printf("\n");
 		break;
 	}
 }
@@ -1374,6 +1456,10 @@ static void dump_audiostreaming_endpoint(libusb_device_handle *dev, const unsign
 
 	if (buf[1] != USB_DT_CS_ENDPOINT)
 		printf("      Warning: Invalid descriptor\n");
+	if (buf[0] < 3) {
+		printf("      Warning: Descriptor too short\n");
+		return;
+	}
 
 	printf("        AudioStreaming Endpoint Descriptor:\n"
 	       "          bLength             %5u\n"
@@ -1387,145 +1473,62 @@ static void dump_audiostreaming_endpoint(libusb_device_handle *dev, const unsign
 
 static void dump_midistreaming_interface(libusb_device_handle *dev, const unsigned char *buf)
 {
-	static const char * const jacktypes[] = {"Undefined", "Embedded", "External"};
-	char *jackstr = NULL;
-	unsigned int j, tlength, capssize;
-	unsigned long caps;
-
 	if (buf[1] != USB_DT_CS_INTERFACE)
 		printf("      Warning: Invalid descriptor\n");
-	else if (buf[0] < 3)
+	if (buf[0] < 3) {
 		printf("      Warning: Descriptor too short\n");
+		return;
+	}
 	printf("      MIDIStreaming Interface Descriptor:\n"
 	       "        bLength             %5u\n"
 	       "        bDescriptorType     %5u\n"
 	       "        bDescriptorSubtype  %5u ",
 	       buf[0], buf[1], buf[2]);
+
 	switch (buf[2]) {
 	case 0x01:
 		printf("(HEADER)\n");
-		if (buf[0] < 7)
-			printf("      Warning: Descriptor too short\n");
-		tlength = buf[5] | (buf[6] << 8);
-		printf("        bcdADC              %2x.%02x\n"
-		       "        wTotalLength       0x%04x\n",
-		       buf[4], buf[3], tlength);
-		dump_junk(buf, "        ", 7);
+		desc_dump(dev, desc_midi_ms_header, buf + 3, buf[0] - 3, 4);
 		break;
-
 	case 0x02:
 		printf("(MIDI_IN_JACK)\n");
-		if (buf[0] < 6)
-			printf("      Warning: Descriptor too short\n");
-		jackstr = get_dev_string(dev, buf[5]);
-		printf("        bJackType           %5u %s\n"
-		       "        bJackID             %5u\n"
-		       "        iJack               %5u %s\n",
-		       buf[3], buf[3] < 3 ? jacktypes[buf[3]] : "Invalid",
-		       buf[4], buf[5], jackstr);
-		dump_junk(buf, "        ", 6);
+		desc_dump(dev, desc_midi_ms_in_jack, buf + 3, buf[0] - 3, 4);
 		break;
-
 	case 0x03:
 		printf("(MIDI_OUT_JACK)\n");
-		if (buf[0] < 9)
-			printf("      Warning: Descriptor too short\n");
-		printf("        bJackType           %5u %s\n"
-		       "        bJackID             %5u\n"
-		       "        bNrInputPins        %5u\n",
-		       buf[3], buf[3] < 3 ? jacktypes[buf[3]] : "Invalid",
-		       buf[4], buf[5]);
-		for (j = 0; j < buf[5]; j++) {
-			printf("        baSourceID(%2u)      %5u\n"
-			       "        BaSourcePin(%2u)     %5u\n",
-			       j, buf[2*j+6], j, buf[2*j+7]);
-		}
-		j = 6+buf[5]*2; /* midi10.pdf says, incorrectly: 5+2*p */
-		jackstr = get_dev_string(dev, buf[j]);
-		printf("        iJack               %5u %s\n",
-		       buf[j], jackstr);
-		dump_junk(buf, "        ", j+1);
+		desc_dump(dev, desc_midi_ms_out_jack, buf + 3, buf[0] - 3, 4);
 		break;
-
 	case 0x04:
 		printf("(ELEMENT)\n");
-		if (buf[0] < 12)
-			printf("      Warning: Descriptor too short\n");
-		printf("        bElementID          %5u\n"
-		       "        bNrInputPins        %5u\n",
-		       buf[3], buf[4]);
-		for (j = 0; j < buf[4]; j++) {
-			printf("        baSourceID(%2u)      %5u\n"
-			       "        BaSourcePin(%2u)     %5u\n",
-			       j, buf[2*j+5], j, buf[2*j+6]);
-		}
-		j = 5+buf[4]*2;
-		printf("        bNrOutputPins       %5u\n"
-		       "        bInTerminalLink     %5u\n"
-		       "        bOutTerminalLink    %5u\n"
-		       "        bElCapsSize         %5u\n",
-		       buf[j], buf[j+1], buf[j+2], buf[j+3]);
-		capssize = buf[j+3];
-		caps = 0;
-		for (j = 0; j < capssize; j++)
-			caps |= (buf[j+9+buf[4]*2] << (8*j));
-		printf("        bmElementCaps  0x%08lx\n", caps);
-		if (caps & 0x01)
-			printf("          Undefined\n");
-		if (caps & 0x02)
-			printf("          MIDI Clock\n");
-		if (caps & 0x04)
-			printf("          MTC (MIDI Time Code)\n");
-		if (caps & 0x08)
-			printf("          MMC (MIDI Machine Control)\n");
-		if (caps & 0x10)
-			printf("          GM1 (General MIDI v.1)\n");
-		if (caps & 0x20)
-			printf("          GM2 (General MIDI v.2)\n");
-		if (caps & 0x40)
-			printf("          GS MIDI Extension\n");
-		if (caps & 0x80)
-			printf("          XG MIDI Extension\n");
-		if (caps & 0x100)
-			printf("          EFX\n");
-		if (caps & 0x200)
-			printf("          MIDI Patch Bay\n");
-		if (caps & 0x400)
-			printf("          DLS1 (Downloadable Sounds Level 1)\n");
-		if (caps & 0x800)
-			printf("          DLS2 (Downloadable Sounds Level 2)\n");
-		j = 9+2*buf[4]+capssize;
-		jackstr = get_dev_string(dev, buf[j]);
-		printf("        iElement            %5u %s\n", buf[j], jackstr);
-		dump_junk(buf, "        ", j+1);
+		desc_dump(dev, desc_midi_ms_element, buf + 3, buf[0] - 3, 4);
 		break;
-
 	default:
-		printf("\n        Invalid desc subtype: ");
-		dump_bytes(buf+3, buf[0]-3);
+		printf("(unknown)\n"
+		       "        Invalid desc subtype:");
+		dump_bytes(buf + 3, buf[0] - 3);
 		break;
 	}
-
-	free(jackstr);
 }
 
-static void dump_midistreaming_endpoint(const unsigned char *buf)
+static void dump_midistreaming_endpoint(libusb_device_handle *dev, const unsigned char *buf)
 {
-	unsigned int j;
+	static const char * const subtypes[] = {
+		"invalid", "GENERAL", "GENERAL_2_0",
+	};
 
 	if (buf[1] != USB_DT_CS_ENDPOINT)
 		printf("      Warning: Invalid descriptor\n");
-	else if (buf[0] < 5)
+	if (buf[0] < 3) {
 		printf("      Warning: Descriptor too short\n");
+		return;
+	}
 	printf("        MIDIStreaming Endpoint Descriptor:\n"
 	       "          bLength             %5u\n"
 	       "          bDescriptorType     %5u\n"
-	       "          bDescriptorSubtype  %5u (%s)\n"
-	       "          bNumEmbMIDIJack     %5u\n",
-	       buf[0], buf[1], buf[2], buf[2] == 2 ? "GENERAL" : "Invalid", buf[3]);
-	for (j = 0; j < buf[3]; j++)
-		printf("          baAssocJackID(%2u)   %5u\n", j, buf[4+j]);
-	dump_junk(buf, "          ", 4+buf[3]);
+	       "          bDescriptorSubtype  %5u (%s)\n",
+	       buf[0], buf[1], buf[2], subtypes[buf[2] < 3 ? buf[2] : 0]);
+
+	desc_dump(dev, desc_midi_ms_endpoint_general, buf + 3, buf[0] - 3, 5);
 }
 
 /*
@@ -1605,12 +1608,15 @@ static void dump_videocontrol_interface(libusb_device_handle *dev, const unsigne
 		"None", "NTSC - 525/60", "PAL - 625/50", "SECAM - 625/50", "NTSC - 625/50", "PAL - 525/60",
 	};
 	unsigned int i, ctrls, stds, n, p, termt, freq;
+	unsigned int version = 0;
 	char *term = NULL, termts[128];
 
 	if (buf[1] != USB_DT_CS_INTERFACE)
 		printf("      Warning: Invalid descriptor\n");
-	else if (buf[0] < 3)
+	if (buf[0] < 3) {
 		printf("      Warning: Descriptor too short\n");
+		return;
+	}
 	printf("      VideoControl Interface Descriptor:\n"
 	       "        bLength             %5u\n"
 	       "        bDescriptorType     %5u\n"
@@ -1619,10 +1625,17 @@ static void dump_videocontrol_interface(libusb_device_handle *dev, const unsigne
 	switch (buf[2]) {
 	case 0x01:  /* HEADER */
 		printf("(HEADER)\n");
-		n = buf[11];
-		if (buf[0] < 12+n)
+		if (buf[0] < 12) {
 			printf("      Warning: Descriptor too short\n");
-		freq = buf[7] | (buf[8] << 8) | (buf[9] << 16) | (buf[10] << 24);
+			break;
+		}
+		n = buf[11];
+		if (buf[0] < 12+n) {
+			printf("      Warning: Descriptor too short\n");
+			break;
+		}
+		freq = convert_le_u32(buf + 7);
+		version = convert_le_u16(buf + 3);
 		printf("        bcdUVC              %2x.%02x\n"
 		       "        wTotalLength       0x%04x\n"
 		       "        dwClockFrequency    %5u.%06uMHz\n"
@@ -1636,12 +1649,18 @@ static void dump_videocontrol_interface(libusb_device_handle *dev, const unsigne
 
 	case 0x02:  /* INPUT_TERMINAL */
 		printf("(INPUT_TERMINAL)\n");
+		if (buf[0] < 8) {
+			printf("      Warning: Descriptor too short\n");
+			break;
+		}
 		term = get_dev_string(dev, buf[7]);
 		termt = buf[4] | (buf[5] << 8);
 		n = termt == 0x0201 ? 7 : 0;
 		get_videoterminal_string(termts, sizeof(termts), termt);
-		if (buf[0] < 8 + n)
+		if (buf[0] < 8 + n) {
 			printf("      Warning: Descriptor too short\n");
+			break;
+		}
 		printf("        bTerminalID         %5u\n"
 		       "        wTerminalType      0x%04x %s\n"
 		       "        bAssocTerminal      %5u\n",
@@ -1650,6 +1669,10 @@ static void dump_videocontrol_interface(libusb_device_handle *dev, const unsigne
 		       buf[7], term);
 		if (termt == 0x0201) {
 			n += buf[14];
+			if (buf[0] < 8 + n) {
+				printf("      Warning: Descriptor too short\n");
+				break;
+			}
 			printf("        wObjectiveFocalLengthMin  %5u\n"
 			       "        wObjectiveFocalLengthMax  %5u\n"
 			       "        wOcularFocalLength        %5u\n"
@@ -1676,11 +1699,13 @@ static void dump_videocontrol_interface(libusb_device_handle *dev, const unsigne
 
 	case 0x03:  /* OUTPUT_TERMINAL */
 		printf("(OUTPUT_TERMINAL)\n");
+		if (buf[0] < 9) {
+			printf("      Warning: Descriptor too short\n");
+			break;
+		}
 		term = get_dev_string(dev, buf[8]);
 		termt = buf[4] | (buf[5] << 8);
 		get_videoterminal_string(termts, sizeof(termts), termt);
-		if (buf[0] < 9)
-			printf("      Warning: Descriptor too short\n");
 		printf("        bTerminalID         %5u\n"
 		       "        wTerminalType      0x%04x %s\n"
 		       "        bAssocTerminal      %5u\n"
@@ -1692,9 +1717,15 @@ static void dump_videocontrol_interface(libusb_device_handle *dev, const unsigne
 
 	case 0x04:  /* SELECTOR_UNIT */
 		printf("(SELECTOR_UNIT)\n");
-		p = buf[4];
-		if (buf[0] < 6+p)
+		if (buf[0] < 5) {
 			printf("      Warning: Descriptor too short\n");
+			break;
+		}
+		p = buf[4];
+		if (buf[0] < 6+p) {
+			printf("      Warning: Descriptor too short\n");
+			break;
+		}
 		term = get_dev_string(dev, buf[5+p]);
 
 		printf("        bUnitID             %5u\n"
@@ -1709,10 +1740,18 @@ static void dump_videocontrol_interface(libusb_device_handle *dev, const unsigne
 
 	case 0x05:  /* PROCESSING_UNIT */
 		printf("(PROCESSING_UNIT)\n");
-		n = buf[7];
-		term = get_dev_string(dev, buf[8+n]);
-		if (buf[0] < 10+n)
+		if (buf[0] < 8) {
 			printf("      Warning: Descriptor too short\n");
+			break;
+		}
+		n = buf[7];
+		if (version >= 0x0110)
+			p = 10;
+		else
+			p = 9;
+		if (!check_descriptor_length(buf[0], p + n))
+			break;
+		term = get_dev_string(dev, buf[8+n]);
 		printf("        bUnitID             %5u\n"
 		       "        bSourceID           %5u\n"
 		       "        wMaxMultiplier      %5u\n"
@@ -1742,11 +1781,21 @@ static void dump_videocontrol_interface(libusb_device_handle *dev, const unsigne
 
 	case 0x06:  /* EXTENSION_UNIT */
 		printf("(EXTENSION_UNIT)\n");
-		p = buf[21];
-		n = buf[22+p];
-		term = get_dev_string(dev, buf[23+p+n]);
-		if (buf[0] < 24+p+n)
+		if (buf[0] < 22) {
 			printf("      Warning: Descriptor too short\n");
+			break;
+		}
+		p = buf[21];
+		if (buf[0] < 23+p) {
+			printf("      Warning: Descriptor too short\n");
+			break;
+		}
+		n = buf[22+p];
+		if (buf[0] < 24+p+n) {
+			printf("      Warning: Descriptor too short\n");
+			break;
+		}
+		term = get_dev_string(dev, buf[23+p+n]);
 		printf("        bUnitID             %5u\n"
 		       "        guidExtensionCode         %s\n"
 		       "        bNumControls        %5u\n"
@@ -1764,9 +1813,11 @@ static void dump_videocontrol_interface(libusb_device_handle *dev, const unsigne
 
 	case 0x07: /* ENCODING UNIT */
 		printf("(ENCODING UNIT)\n");
-		term = get_dev_string(dev, buf[5]);
-		if (buf[0] < 13)
+		if (buf[0] < 13) {
 			printf("      Warning: Descriptor too short\n");
+			break;
+		}
+		term = get_dev_string(dev, buf[5]);
 		printf("        bUnitID             %5u\n"
 		       "        bSourceID           %5u\n"
 		       "        iEncoding           %5u %s\n"
@@ -1790,7 +1841,10 @@ static void dump_videocontrol_interface(libusb_device_handle *dev, const unsigne
 	default:
 		printf("(unknown)\n"
 		       "        Invalid desc subtype:");
-		dump_bytes(buf+3, buf[0]-3);
+		if (buf[0] > 3)
+			dump_bytes(buf+3, buf[0]-3);
+		else
+			printf("\n");
 		break;
 	}
 
@@ -1801,10 +1855,12 @@ static void dump_videocontrol_interrupt_endpoint(const unsigned char *buf)
 {
 	unsigned int wMaxTransferSize;
 
-	if (buf[0] < 5)
-		printf("      Warning: Descriptor too short\n");
 	if (buf[1] != USB_DT_CS_ENDPOINT)
 		printf("      Warning: Invalid descriptor\n");
+	if (buf[0] < 5) {
+		printf("      Warning: Descriptor too short\n");
+		return;
+	}
 	wMaxTransferSize = buf[3] | (buf[4] << 8);
 	printf("        VideoControl Endpoint Descriptor:\n"
 	       "          bLength             %5u\n"
@@ -1829,8 +1885,10 @@ static void dump_videostreaming_interface(const unsigned char *buf)
 
 	if (buf[1] != USB_DT_CS_INTERFACE)
 		printf("      Warning: Invalid descriptor\n");
-	else if (buf[0] < 3)
+	if (buf[0] < 3) {
 		printf("      Warning: Descriptor too short\n");
+		return;
+	}
 	printf("      VideoStreaming Interface Descriptor:\n"
 	       "        bLength                         %5u\n"
 	       "        bDescriptorType                 %5u\n"
@@ -1839,10 +1897,16 @@ static void dump_videostreaming_interface(const unsigned char *buf)
 	switch (buf[2]) {
 	case 0x01: /* INPUT_HEADER */
 		printf("(INPUT_HEADER)\n");
+		if (buf[0] < 13) {
+			printf("      Warning: Descriptor too short\n");
+			break;
+		}
 		p = buf[3];
 		n = buf[12];
-		if (buf[0] < 13+p*n)
+		if (buf[0] < 13+p*n) {
 			printf("      Warning: Descriptor too short\n");
+			break;
+		}
 		printf("        bNumFormats                     %5u\n"
 		       "        wTotalLength                   0x%04x\n"
 		       "        bEndpointAddress                 0x%02x  EP %u %s\n"
@@ -1864,10 +1928,16 @@ static void dump_videostreaming_interface(const unsigned char *buf)
 
 	case 0x02: /* OUTPUT_HEADER */
 		printf("(OUTPUT_HEADER)\n");
+		if (buf[0] < 9) {
+			printf("      Warning: Descriptor too short\n");
+			break;
+		}
 		p = buf[3];
 		n = buf[8];
-		if (buf[0] < 9+p*n)
+		if (buf[0] < 9+p*n) {
 			printf("      Warning: Descriptor too short\n");
+			break;
+		}
 		printf("        bNumFormats                 %5u\n"
 		       "        wTotalLength               0x%04x\n"
 		       "        bEndpointAddress             0x%02x  EP %u %s\n"
@@ -1885,10 +1955,20 @@ static void dump_videostreaming_interface(const unsigned char *buf)
 
 	case 0x03: /* STILL_IMAGE_FRAME */
 		printf("(STILL_IMAGE_FRAME)\n");
-		n = buf[4];
-		m = buf[5+4*n];
-		if (buf[0] < 6+4*n+m)
+		if (buf[0] < 5) {
 			printf("      Warning: Descriptor too short\n");
+			break;
+		}
+		n = buf[4];
+		if (buf[0] < 6+4*n) {
+			printf("      Warning: Descriptor too short\n");
+			break;
+		}
+		m = buf[5+4*n];
+		if (buf[0] < 6+4*n+m) {
+			printf("      Warning: Descriptor too short\n");
+			break;
+		}
 		printf("        bEndpointAddress                 0x%02x  EP %u %s\n"
 		       "        bNumImageSizePatterns             %3u\n",
 		       buf[3], buf[3] & 0x0f, (buf[3] & 0x80) ? "IN" : "OUT", n);
@@ -1913,8 +1993,10 @@ static void dump_videostreaming_interface(const unsigned char *buf)
 			printf("(FORMAT_FRAME_BASED)\n");
 			len = 28;
 		}
-		if (buf[0] < len)
+		if (buf[0] < len) {
 			printf("      Warning: Descriptor too short\n");
+			break;
+		}
 		flags = buf[25];
 		printf("        bFormatIndex                    %5u\n"
 		       "        bNumFrameDescriptors            %5u\n"
@@ -1966,9 +2048,15 @@ static void dump_videostreaming_interface(const unsigned char *buf)
 			printf("(FRAME_FRAME_BASED)\n");
 			n = 21;
 		}
-		len = (buf[n] != 0) ? (26+buf[n]*4) : 38;
-		if (buf[0] < len)
+		if (buf[0] < n + 1) {
 			printf("      Warning: Descriptor too short\n");
+			break;
+		}
+		len = (buf[n] != 0) ? (26+buf[n]*4) : 38;
+		if (buf[0] < len) {
+			printf("      Warning: Descriptor too short\n");
+			break;
+		}
 		flags = buf[4];
 		printf("        bFrameIndex                     %5u\n"
 		       "        bmCapabilities                   0x%02x\n",
@@ -1982,41 +2070,42 @@ static void dump_videostreaming_interface(const unsigned char *buf)
 		       "        dwMinBitRate                %9u\n"
 		       "        dwMaxBitRate                %9u\n",
 		       buf[5] | (buf[6] <<  8), buf[7] | (buf[8] << 8),
-		       buf[9] | (buf[10] << 8) | (buf[11] << 16) | (buf[12] << 24),
-		       buf[13] | (buf[14] << 8) | (buf[15] << 16) | (buf[16] << 24));
+		       convert_le_u32(buf + 9),
+		       convert_le_u32(buf + 13));
 		if (buf[2] == 0x11)
 			printf("        dwDefaultFrameInterval      %9u\n"
 			       "        bFrameIntervalType              %5u\n"
 			       "        dwBytesPerLine              %9u\n",
-			       buf[17] | (buf[18] << 8) | (buf[19] << 16) | (buf[20] << 24),
+			       convert_le_u32(buf + 17),
 			       buf[21],
-			       buf[22] | (buf[23] << 8) | (buf[24] << 16) | (buf[25] << 24));
+			       convert_le_u32(buf + 22));
 		else
 			printf("        dwMaxVideoFrameBufferSize   %9u\n"
 			       "        dwDefaultFrameInterval      %9u\n"
 			       "        bFrameIntervalType              %5u\n",
-			       buf[17] | (buf[18] << 8) | (buf[19] << 16) | (buf[20] << 24),
-			       buf[21] | (buf[22] << 8) | (buf[23] << 16) | (buf[24] << 24),
+			       convert_le_u32(buf + 17),
+			       convert_le_u32(buf + 21),
 			       buf[25]);
 		if (buf[n] == 0)
 			printf("        dwMinFrameInterval          %9u\n"
 			       "        dwMaxFrameInterval          %9u\n"
 			       "        dwFrameIntervalStep         %9u\n",
-			       buf[26] | (buf[27] << 8) | (buf[28] << 16) | (buf[29] << 24),
-			       buf[30] | (buf[31] << 8) | (buf[32] << 16) | (buf[33] << 24),
-			       buf[34] | (buf[35] << 8) | (buf[36] << 16) | (buf[37] << 24));
+			       convert_le_u32(buf + 26),
+			       convert_le_u32(buf + 30),
+			       convert_le_u32(buf + 34));
 		else
 			for (i = 0; i < buf[n]; i++)
 				printf("        dwFrameInterval(%2u)         %9u\n",
-				       i, buf[26+4*i] | (buf[27+4*i] << 8) |
-				       (buf[28+4*i] << 16) | (buf[29+4*i] << 24));
+				       i, convert_le_u32(buf + 26 + 4*i));
 		dump_junk(buf, "        ", len);
 		break;
 
 	case 0x06: /* FORMAT_MJPEG */
 		printf("(FORMAT_MJPEG)\n");
-		if (buf[0] < 11)
+		if (buf[0] < 11) {
 			printf("      Warning: Descriptor too short\n");
+			break;
+		}
 		flags = buf[5];
 		printf("        bFormatIndex                    %5u\n"
 		       "        bNumFrameDescriptors            %5u\n"
@@ -2058,8 +2147,10 @@ static void dump_videostreaming_interface(const unsigned char *buf)
 	case 0x0a: /* FORMAT_MPEG2TS */
 		printf("(FORMAT_MPEG2TS)\n");
 		len = buf[0] < 23 ? 7 : 23;
-		if (buf[0] < len)
+		if (buf[0] < len) {
 			printf("      Warning: Descriptor too short\n");
+			break;
+		}
 		printf("        bFormatIndex                    %5u\n"
 		       "        bDataOffset                     %5u\n"
 		       "        bPacketLength                   %5u\n"
@@ -2073,8 +2164,10 @@ static void dump_videostreaming_interface(const unsigned char *buf)
 
 	case 0x0d: /* COLORFORMAT */
 		printf("(COLORFORMAT)\n");
-		if (buf[0] < 6)
+		if (buf[0] < 6) {
 			printf("      Warning: Descriptor too short\n");
+			break;
+		}
 		printf("        bColorPrimaries                 %5u (%s)\n",
 		       buf[3], (buf[3] <= 5) ? colorPrims[buf[3]] : "Unknown");
 		printf("        bTransferCharacteristics        %5u (%s)\n",
@@ -2086,8 +2179,10 @@ static void dump_videostreaming_interface(const unsigned char *buf)
 
 	case 0x12: /* FORMAT_STREAM_BASED */
 		printf("(FORMAT_STREAM_BASED)\n");
-		if (buf[0] != 24)
-			printf("      Warning: Incorrect descriptor length\n");
+		if (buf[0] < 24) {
+			printf("      Warning: Descriptor too short\n");
+			break;
+		}
 
 		printf("        bFormatIndex                    %5u\n"
 		       "        guidFormat                            %s\n"
@@ -2098,7 +2193,10 @@ static void dump_videostreaming_interface(const unsigned char *buf)
 
 	default:
 		printf("        Invalid desc subtype:");
-		dump_bytes(buf+3, buf[0]-3);
+		if (buf[0] > 3)
+			dump_bytes(buf+3, buf[0]-3);
+		else
+			printf("\n");
 		break;
 	}
 }
@@ -2107,8 +2205,10 @@ static void dump_dfu_interface(const unsigned char *buf)
 {
 	if (buf[1] != USB_DT_CS_DEVICE)
 		printf("      Warning: Invalid descriptor\n");
-	else if (buf[0] < 7)
+	if (buf[0] < 7) {
 		printf("      Warning: Descriptor too short\n");
+		return;
+	}
 	printf("      Device Firmware Upgrade Interface Descriptor:\n"
 	       "        bLength                         %5u\n"
 	       "        bDescriptorType                 %5u\n"
@@ -2188,7 +2288,7 @@ static void dump_hub(const char *prefix, const unsigned char *p, int tt_type)
 		printf("%s  bHubDecLat          0.%1u micro seconds\n",
 				prefix, p[7]);
 		printf("%s  wHubDelay          %4u nano seconds\n",
-				prefix, (p[8] << 4) +(p[7]));
+				prefix, (p[9] << 8) | p[8]);
 		offset = 10;
 	} else {
 		offset = 7;
@@ -2333,7 +2433,7 @@ static void dump_ccid_device(const unsigned char *buf)
 	if (buf[49] == 0xff)
 		fputs("echo\n", stdout);
 	else
-		printf("  %02X\n", buf[48]);
+		printf("  %02X\n", buf[49]);
 
 	printf("        wlcdLayout           ");
 	if (!buf[50] && !buf[51])
@@ -2374,13 +2474,15 @@ static void dump_report_desc(unsigned char *b, int l)
 		bsize = b[i] & 0x03;
 		if (bsize == 3)
 			bsize = 4;
-		/* Truncated item: avoid OOB reads of b[i+1+j] */
-		if (bsize > 0 && i + 1 + (int)bsize > l)
-			return;
+		if (i + 1 + (int)bsize > l) {
+			/* Truncated item: avoid OOB reads of b[i+1+j] */
+			printf("            ** TRUNCATED at offset %d **\n", i);
+			break;
+		}
 		btype = b[i] & (0x03 << 2);
 		btag = b[i] & ~0x03; /* 2 LSB bits encode length */
 		printf("            Item(%-6s): %s, data=", types[btype>>2],
-				names_reporttag(btag));
+				names_reporttag(btag) ? : "Unknown");
 		if (bsize > 0) {
 			printf(" [ ");
 			data = 0;
@@ -2394,7 +2496,7 @@ static void dump_report_desc(unsigned char *b, int l)
 		printf("\n");
 		switch (btag) {
 		case 0x04: /* Usage Page */
-			printf("%s%s\n", indent, names_huts(data));
+			printf("%s%s\n", indent, names_huts(data) ? : "Unknown");
 			hut = data;
 			break;
 
@@ -2402,7 +2504,7 @@ static void dump_report_desc(unsigned char *b, int l)
 		case 0x18: /* Usage Minimum */
 		case 0x28: /* Usage Maximum */
 			printf("%s%s\n", indent,
-			       names_hutus((hut << 16) + data));
+			       names_hutus((hut << 16) + data) ? : "Unknown");
 			break;
 
 		case 0x54: /* Unit Exponent */
@@ -2484,6 +2586,11 @@ static void dump_printer_device(libusb_device_handle *dev,
 	if (interface->bInterfaceProtocol != 0x04)  /* IPP-over-USB */
 		return;
 
+	if (buf[0] < 4) {
+		printf("        Warning: IPP Printer Descriptor too short\n");
+		return;
+	}
+
 	printf("        IPP Printer Descriptor:\n"
 	       "          bLength             %5u\n"
 	       "          bDescriptorType     %5u\n"
@@ -2493,10 +2600,21 @@ static void dump_printer_device(libusb_device_handle *dev,
 
 	n = 4;
 	for (i = 0 ; i < buf[3] ; i++) {
+		if (n + 2 > buf[0] || n + 2 + buf[n+1] > buf[0]) {
+			printf("            Warning: Descriptor too short\n");
+			break;
+		}
 		switch (buf[n]) {
 		case 0x00: {  /* Basic capabilities */
-			uint16_t caps = le16_to_cpu(*((uint16_t*)&buf[n+2]));
-			char *uuid = get_dev_string(dev, buf[n+5]);
+			uint16_t caps;
+			char *uuid;
+
+			if (n + 6 > buf[0]) {
+				printf("          Warning: Descriptor too short\n");
+				return;
+			}
+			caps = buf[n+2] | (buf[n+3] << 8);
+			uuid = get_dev_string(dev, buf[n+5]);
 
 			printf("            iIPPVersionsSupported %5u\n", buf[n+4]);
 			printf("            iIPPPrinterUUID       %5u %s\n", buf[n+5], uuid);
@@ -2537,11 +2655,15 @@ static void dump_hid_device(libusb_device_handle *dev,
 			    const unsigned char *buf)
 {
 	int i, len;
-	unsigned char dbuf[8192];
+	unsigned char dbuf[8192] = {0};
 
 	if (buf[1] != LIBUSB_DT_HID)
 		printf("      Warning: Invalid descriptor\n");
-	else if (buf[0] < 6+3*buf[5])
+	if (buf[0] < 6) {
+		printf("      Warning: Descriptor too short\n");
+		return;
+	}
+	if (buf[0] < 6+3*buf[5])
 		printf("      Warning: Descriptor too short\n");
 	printf("        HID Device Descriptor:\n"
 	       "          bLength             %5u\n"
@@ -2551,10 +2673,10 @@ static void dump_hid_device(libusb_device_handle *dev,
 	       "          bNumDescriptors     %5u\n",
 	       buf[0], buf[1], buf[3], buf[2], buf[4],
 	       names_countrycode(buf[4]) ? : "Unknown", buf[5]);
-	for (i = 0; i < buf[5]; i++)
+	for (i = 0; i < buf[5] && 6+3*i+3 <= buf[0]; i++)
 		printf("          bDescriptorType     %5u %s\n"
 		       "          wDescriptorLength   %5u\n",
-		       buf[6+3*i], names_hid(buf[6+3*i]),
+		       buf[6+3*i], names_hid(buf[6+3*i]) ? : "Unknown",
 		       buf[7+3*i] | (buf[8+3*i] << 8));
 	dump_junk(buf, "        ", 6+3*buf[5]);
 	if (!do_report_desc)
@@ -2566,7 +2688,7 @@ static void dump_hid_device(libusb_device_handle *dev,
 		return;
 	}
 
-	for (i = 0; i < buf[5]; i++) {
+	for (i = 0; i < buf[5] && 6+3*i+3 <= buf[0]; i++) {
 		/* we are just interested in report descriptors*/
 		if (buf[6+3*i] != LIBUSB_DT_REPORT)
 			continue;
@@ -2610,10 +2732,14 @@ static void dump_hid_device(libusb_device_handle *dev,
 static void
 dump_comm_descriptor(libusb_device_handle *dev, const unsigned char *buf, const char *indent)
 {
-	int		tmp;
+	unsigned int	tmp;
 	char		*str = NULL;
 	const char	*type;
 
+	if (buf[0] < 3) {
+		printf("%sWarning: Descriptor too short\n", indent);
+		return;
+	}
 	switch (buf[2]) {
 	case 0:
 		type = "Header";
@@ -2733,10 +2859,7 @@ dump_comm_descriptor(libusb_device_handle *dev, const unsigned char *buf, const 
 		if (buf[0] != 13)
 			goto bad;
 		str = get_dev_string(dev, buf[3]);
-		tmp = buf[7] << 8;
-		tmp |= buf[6]; tmp <<= 8;
-		tmp |= buf[5]; tmp <<= 8;
-		tmp |= buf[4];
+		tmp = convert_le_u32(buf + 4);
 		printf("%sCDC Ethernet:\n"
 		       "%s  iMacAddress             %10d %s\n"
 		       "%s  bmEthernetStatistics    0x%08x\n",
@@ -2943,7 +3066,7 @@ static void do_hub(libusb_device_handle *fd, unsigned tt_type, unsigned speed,
 		   bool has_ssp)
 {
 	unsigned char buf[7 /* base descriptor */
-			+ 2 /* bitmasks */ * HUB_STATUS_BYTELEN];
+			+ 2 /* bitmasks */ * HUB_STATUS_BYTELEN] = {0};
 	int i, ret, value;
 	unsigned int link_state;
 	static const char * const link_state_descriptions[] = {
@@ -2990,7 +3113,7 @@ static void do_hub(libusb_device_handle *fd, unsigned tt_type, unsigned speed,
 
 	printf(" Hub Port Status:\n");
 	for (i = 0; i < buf[2]; i++) {
-		unsigned char status[8];
+		unsigned char status[8] = {0};
 
 		/* Request EXT_PORT_STATUS for USB 3.1 SuperSpeedPlus hubs,
 		   PORT_STATUS otherwise */
@@ -3069,7 +3192,7 @@ static void do_hub(libusb_device_handle *fd, unsigned tt_type, unsigned speed,
 
 static void do_dualspeed(libusb_device_handle *fd)
 {
-	unsigned char buf[10];
+	unsigned char buf[10] = {0};
 	char cls[128], subcls[128], proto[128];
 	int ret;
 
@@ -3120,7 +3243,7 @@ static void do_dualspeed(libusb_device_handle *fd)
 
 static void do_debug(libusb_device_handle *fd)
 {
-	unsigned char buf[4];
+	unsigned char buf[4] = {0};
 	int ret;
 
 	ret = usb_control_msg(fd,
@@ -3162,7 +3285,7 @@ static const unsigned char *find_otg(const unsigned char *buf, int buflen)
 	while (buflen >= 3) {
 		if (buf[0] == 3 && buf[1] == USB_DT_OTG)
 			return buf;
-		if (buf[0] > buflen)
+		if (buf[0] < 2 || buf[0] > buflen)
 			return 0;
 		buflen -= buf[0];
 		buf += buf[0];
@@ -3214,7 +3337,7 @@ static int do_otg(struct libusb_config_descriptor *config)
 static void
 dump_device_status(libusb_device_handle *fd, int otg, int super_speed)
 {
-	unsigned char status[8];
+	unsigned char status[8] = {0};
 	int ret;
 
 	ret = usb_control_msg(fd, LIBUSB_ENDPOINT_IN | LIBUSB_REQUEST_TYPE_STANDARD
@@ -3267,8 +3390,11 @@ static void dump_usb2_device_capability_desc(unsigned char *buf, bool lpm_requir
 	unsigned int wide;
 	unsigned int besl;
 
-	wide = buf[3] + (buf[4] << 8) +
-		(buf[5] << 16) + (buf[6] << 24);
+	if (buf[0] < 7) {
+		fprintf(stderr, "  Bad USB 2.0 Extension Device Capability descriptor.\n");
+		return;
+	}
+	wide = convert_le_u32(buf + 3);
 	printf("  USB 2.0 Extension Device Capability:\n"
 			"    bLength             %5u\n"
 			"    bDescriptorType     %5u\n"
@@ -3356,6 +3482,10 @@ static void dump_ssp_device_capability_desc(unsigned char *buf)
 		fprintf(stderr, "  Bad SuperSpeedPlus USB Device Capability descriptor.\n");
 		return;
 	}
+	if (buf[0] < 12 + ((buf[4] & 0x1f) + 1) * 4) {
+		fprintf(stderr, "  Bad SuperSpeedPlus USB Device Capability descriptor.\n");
+		return;
+	}
 
 	bm_attr = convert_le_u32(buf + 4);
 	printf("  SuperSpeedPlus USB Device Capability:\n"
@@ -3372,7 +3502,7 @@ static void dump_ssp_device_capability_desc(unsigned char *buf)
 	printf("      Min functional RX lanes: %u\n", buf[9] & 0x0f);
 	printf("      Min functional TX lanes: %u\n", (buf[9] >> 4) & 0x0f);
 
-	for (i = 0; i <= (buf[4] & 0x1f); i++) {
+	for (i = 0; i <= (buf[4] & 0x1f) && 12 + (i * 4) + 4 <= buf[0]; i++) {
 		ss_attr = convert_le_u32(buf + 12 + (i * 4));
 		printf("    bmSublinkSpeedAttr[%u]   0x%08x\n", i, ss_attr);
 		printf("      Speed Attribute ID: %u %u%cb/s %s %s SuperSpeed%s\n",
@@ -3403,7 +3533,7 @@ static void dump_container_id_device_capability_desc(unsigned char *buf)
 
 static char *get_webusb_url(libusb_device_handle *fd, uint8_t vendor_req, uint8_t id)
 {
-	unsigned char url_buf[255];
+	unsigned char url_buf[255] = {0};
 	const char *scheme;
 	char *url, *chr;
 	unsigned char i;
@@ -3440,7 +3570,8 @@ static char *get_webusb_url(libusb_device_handle *fd, uint8_t vendor_req, uint8_
 	for (i = 3; i < url_buf[0]; i++)
 		/* crude UTF-8 to ASCII conversion */
 		if (url_buf[i] < 0x80)
-			*chr++ = url_buf[i];
+			*chr++ = (url_buf[i] < 0x20 || url_buf[i] == 0x7f)
+					? '?' : url_buf[i];
 	*chr = '\0';
 
 	return url;
@@ -3577,6 +3708,27 @@ static void dump_billboard_alt_mode_capability_desc(unsigned char *buf)
 			convert_le_u32(&buf[4]));
 }
 
+static void dump_fwstatus_capability_desc(unsigned char *buf)
+{
+	if (buf[0] != 8) {
+		fprintf(stderr, "  Bad FWStatus Capability descriptor.\n");
+		return;
+	}
+
+	unsigned int flags = convert_le_u32(&buf[4]);
+	printf("  FWStatus Capability:\n"
+			"    bLength		    %5u\n"
+			"    bDescriptorType	    %5u\n"
+			"    bDevCapabilityType	    %5u\n"
+			"    bcdDescriptorVersion   %5u\n"
+			"    bmAttributes	    0x%08X\n"
+			"      Get FW Image Hash support: %s\n"
+			"      Disallow FW Update support: %s\n",
+			buf[0], buf[1], buf[2], buf[3], flags,
+			flags & (1 << 0) ? "Yes" : "No",
+			flags & (1 << 1) ? "Yes" : "No");
+}
+
 static void dump_bos_descriptor(libusb_device_handle *fd, bool* has_ssp, bool lpm_required)
 {
 	/* Total length of BOS descriptors varies.
@@ -3584,7 +3736,7 @@ static void dump_bos_descriptor(libusb_device_handle *fd, bool* has_ssp, bool lp
 	 * allocating and reading the full BOS
 	 */
 
-	unsigned char bos_desc_static[5];
+	unsigned char bos_desc_static[5] = {0};
 	unsigned char *bos_desc;
 	unsigned int bos_desc_size;
 	int size, ret;
@@ -3635,8 +3787,9 @@ static void dump_bos_descriptor(libusb_device_handle *fd, bool* has_ssp, bool lp
 	buf = &bos_desc[5];
 
 	while (size >= 3) {
-		if (buf[0] < 3) {
-			printf("buf[0] = %u\n", buf[0]);
+		if (buf[0] < 3 || buf[0] > size) {
+			printf("  ** Bad device-capability bLength %u (%d left)\n",
+			       buf[0], size);
 			goto out;
 		}
 		switch (buf[2]) {
@@ -3669,6 +3822,9 @@ static void dump_bos_descriptor(libusb_device_handle *fd, bool* has_ssp, bool lp
 			printf("  Configuration Summary Device Capability:\n");
 			desc_dump(fd, desc_usb3_dc_configuration_summary,
 					buf, DESC_BUF_LEN_FROM_BUF, 2);
+			break;
+		case USB_DC_FWSTATUS_CAPABILITY:
+			dump_fwstatus_capability_desc(buf);
 			break;
 		default:
 			printf("  ** UNRECOGNIZED: ");

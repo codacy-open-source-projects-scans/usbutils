@@ -43,7 +43,9 @@ int get_sysfs_name(char *buf, size_t size, libusb_device *dev)
 		return snprintf(buf, size, "usb%d", bnum);
 	}
 
-	len += snprintf(buf, size, "%d-", bnum);
+	len = snprintf(buf, size, "%d-", bnum);
+	if (len < 0 || (size_t)len >= size)
+		return -1;
 	for (int i = 0; i < num_pnums; i++) {
 		int n = snprintf(buf + len, size - len, i ? ".%d" : "%d", pnums[i]);
 		if ((n < 0) || (n >= (int)(size - len)))
@@ -66,10 +68,17 @@ int read_sysfs_prop(char *buf, size_t size, const char *sysfs_name, const char *
 	if (fd == -1)
 		return 0;
 
-	n = read(fd, buf, size);
+	n = read(fd, buf, size - 1);
 
-	if (n > 0)
-		buf[n-1] = '\0';  // Turn newline into null terminator
+	if (n > 0) {
+		buf[n] = '\0';
+		/* Strip trailing newline if present */
+		if (n > 0 && buf[n - 1] == '\n')
+			buf[n - 1] = '\0';
+		for (int i = 0; buf[i]; i++)
+			if ((unsigned char)buf[i] < 0x20 || buf[i] == 0x7f)
+				buf[i] = '?';
+	}
 
 	close(fd);
 	return n;
